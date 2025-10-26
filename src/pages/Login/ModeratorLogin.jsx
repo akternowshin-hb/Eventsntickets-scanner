@@ -115,21 +115,30 @@ const ModeratorLogin = () => {
   return (
     <>
       <style>{fadeInUp}</style>
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-tr from-gray-900 via-orange-500 to-yellow-400 relative overflow-hidden px-4">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-tr from-gray-900 via-orange-500 to-yellow-400 relative overflow-hidden px-4 text-gray-800">
         <div className="absolute top-10 left-10 w-72 h-72 bg-orange-400 opacity-30 rounded-full blur-3xl animate-pulse -z-10"></div>
         <div className="absolute bottom-20 right-20 w-60 h-60 bg-yellow-300 opacity-20 rounded-full blur-2xl -z-10"></div>
 
         <div className="bg-white/20 backdrop-blur-xl border border-white/30 shadow-2xl rounded-3xl p-8 w-full max-w-md mx-auto">
-          <div className="flex flex-col items-center justify-center text-center mb-6">
+          <div className="flex flex-col items-center justify-center text-center mb-4">
             <div className="bg-gradient-to-br from-orange-100 to-orange-300 text-white p-4 rounded-full shadow-lg mb-4">
               <img className="w-12 h-12" src={logo} alt="Logo" />
             </div>
             <h2 className="text-3xl font-bold text-white text-center drop-shadow-lg mb-2">
               Moderator Portal
             </h2>
-            <p className="text-sm text-orange-50 text-center">
-              Sign in to access the ticket scanner system
-            </p>
+            <div className="bg-blue-500/20 backdrop-blur-sm border border-blue-400/50 rounded-lg p-4 mt-4">
+              <div className="flex items-start">
+                <Shield
+                  className="text-blue-300 mr-3 mt-0.5 flex-shrink-0"
+                  size={20}
+                />
+                <p className="text-sm text-blue-50">
+                  Use the credentials provided by the administrator to access
+                  the ticket scanner.
+                </p>
+              </div>
+            </div>
           </div>
 
           {error && (
@@ -224,25 +233,14 @@ const ModeratorLogin = () => {
               )}
             </button>
 
-            <div className="bg-blue-500/20 backdrop-blur-sm border border-blue-400/50 rounded-lg p-4 mt-4">
-              <div className="flex items-start">
-                <Shield
-                  className="text-blue-300 mr-3 mt-0.5 flex-shrink-0"
-                  size={20}
-                />
-                <p className="text-sm text-blue-50">
-                  Use the credentials provided by the administrator to access
-                  the ticket scanner.
-                </p>
-              </div>
-            </div>
+            
           </form>
         </div>
 
-        <div className="absolute bottom-6 text-center w-full text-sm text-white/70">
+        {/* <div className="absolute bottom-6 text-center w-full text-sm text-white/70">
           <p>© 2025 Ticket Scanner System</p>
           <p className="mt-1">Secure Moderator Access</p>
-        </div>
+        </div> */}
       </div>
     </>
   );
