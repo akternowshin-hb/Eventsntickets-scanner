@@ -22,8 +22,6 @@ import {
   Shield,
   AlertCircle,
   Camera,
-  FileImage,
-  Upload,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import serverURL from "../../ServerConfig";
@@ -33,6 +31,7 @@ const TicketScanner = () => {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const scanIntervalRef = useRef(null);
   
   // Get moderator data from localStorage
   const [moderatorData, setModeratorData] = useState(null);
@@ -57,11 +56,10 @@ const TicketScanner = () => {
   const [manualCode, setManualCode] = useState("");
   
   // OCR states
-  const [ocrProgress, setOcrProgress] = useState(0);
-  const [isOcrProcessing, setIsOcrProcessing] = useState(false);
-  const [capturedImage, setCapturedImage] = useState(null);
-  const [stream, setStream] = useState(null);
-  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [ocrScanning, setOcrScanning] = useState(false);
+  const [ocrStream, setOcrStream] = useState(null);
+  const [lastScannedCode, setLastScannedCode] = useState("");
+  const [ocrStatus, setOcrStatus] = useState("Ready to scan");
   
   // Event info state
   const [eventInfo, setEventInfo] = useState(null);
@@ -81,21 +79,38 @@ const TicketScanner = () => {
     const parsedData = JSON.parse(data);
     setModeratorData(parsedData);
 
-    // Fetch stats and recent scans
     if (parsedData?._id || parsedData?.id) {
       fetchTodayStats(parsedData._id || parsedData.id, token);
       fetchRecentScans(parsedData._id || parsedData.id, token);
     }
   }, [navigate]);
 
-  // Cleanup camera stream on unmount or mode change
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopCamera();
+      stopOcrCamera();
     };
   }, []);
 
-  // Fetch today's stats from API
+  // Auto-scan effect when OCR camera is active
+  useEffect(() => {
+    if (ocrScanning && videoRef.current && videoRef.current.readyState === 4) {
+      scanIntervalRef.current = setInterval(() => {
+        captureAndScan();
+      }, 2000); // Scan every 2 seconds
+    } else {
+      if (scanIntervalRef.current) {
+        clearInterval(scanIntervalRef.current);
+      }
+    }
+
+    return () => {
+      if (scanIntervalRef.current) {
+        clearInterval(scanIntervalRef.current);
+      }
+    };
+  }, [ocrScanning]);
+
   const fetchTodayStats = async (moderatorId, token) => {
     try {
       const response = await fetch(`${serverURL.url}moderator/stats/${moderatorId}`, {
@@ -108,8 +123,6 @@ const TicketScanner = () => {
 
       if (response.ok) {
         const data = await response.json();
-        console.log("📊 Stats from API:", data);
-        
         if (data.stats) {
           setStats({
             totalScanned: data.stats.totalScanned || 0,
@@ -124,7 +137,6 @@ const TicketScanner = () => {
     }
   };
 
-  // Fetch recent scans from API
   const fetchRecentScans = async (moderatorId, token) => {
     try {
       const response = await fetch(`${serverURL.url}moderator/recent/${moderatorId}`, {
@@ -137,8 +149,6 @@ const TicketScanner = () => {
 
       if (response.ok) {
         const data = await response.json();
-        console.log("📜 Recent scans from API:", data);
-        
         if (data.recentScans && Array.isArray(data.recentScans)) {
           const formattedHistory = data.recentScans.map(scan => ({
             code: scan.ticketCode,
@@ -161,162 +171,154 @@ const TicketScanner = () => {
     }
   };
 
-  // Camera functions for OCR
-  const startCamera = async () => {
+  // Start OCR Camera with continuous feed
+  const startOcrCamera = async () => {
     try {
-      stopCamera(); // Stop any existing stream first
+      stopOcrCamera(); // Stop any existing stream
       
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment", // Use back camera on mobile
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         }
       });
       
-      setStream(mediaStream);
-      setIsCameraActive(true);
+      setOcrStream(mediaStream);
       
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
         videoRef.current.play();
+        
+        // Wait for video to be ready
+        videoRef.current.onloadedmetadata = () => {
+          setOcrScanning(true);
+          setOcrStatus("Camera active - Point at ticket");
+          toast.success("Camera started - Hold ticket steady");
+        };
       }
-      
-      toast.success("Camera started successfully");
     } catch (error) {
       console.error("Error starting camera:", error);
       toast.error("Failed to start camera. Please check permissions.");
+      setOcrStatus("Camera failed to start");
     }
   };
 
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-      setIsCameraActive(false);
+  const stopOcrCamera = () => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
     }
+    
+    if (ocrStream) {
+      ocrStream.getTracks().forEach(track => track.stop());
+      setOcrStream(null);
+    }
+    
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    
+    setOcrScanning(false);
+    setOcrStatus("Camera stopped");
   };
 
-  const captureImage = () => {
-    if (!videoRef.current || !canvasRef.current) {
-      toast.error("Camera not ready");
+  // Capture and scan automatically
+  const captureAndScan = async () => {
+    if (!videoRef.current || !canvasRef.current || isLoading) {
       return;
     }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
+    
+    // Check if video is ready
+    if (video.readyState !== 4) {
+      return;
+    }
 
-    // Set canvas dimensions to match video
+    const context = canvas.getContext("2d");
+    
+    // Set canvas size to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Draw the video frame to canvas
+    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Convert canvas to blob
-    canvas.toBlob((blob) => {
+    // Convert to blob
+    canvas.toBlob(async (blob) => {
       if (blob) {
-        const imageUrl = URL.createObjectURL(blob);
-        setCapturedImage(imageUrl);
-        processImageWithOCR(imageUrl);
+        setOcrStatus("Scanning...");
+        await processImageWithOCR(blob);
       }
-    }, "image/jpeg", 0.95);
+    }, "image/jpeg", 0.8);
   };
 
-  const handleFileUpload = (event) => {
-    const file = event.target.files[0];
-    if (file && file.type.startsWith("image/")) {
-      const imageUrl = URL.createObjectURL(file);
-      setCapturedImage(imageUrl);
-      processImageWithOCR(imageUrl);
-    } else {
-      toast.error("Please select a valid image file");
-    }
-  };
-
-  const processImageWithOCR = async (imageUrl) => {
-    setIsOcrProcessing(true);
-    setOcrProgress(0);
+  // Process image with OCR
+  const processImageWithOCR = async (imageBlob) => {
+    if (isLoading) return;
 
     try {
       const result = await Tesseract.recognize(
-        imageUrl,
+        imageBlob,
         "eng",
         {
-          logger: (m) => {
-            if (m.status === "recognizing text") {
-              setOcrProgress(Math.round(m.progress * 100));
-            }
-          },
+          logger: () => {}, // Silent logging for continuous scanning
         }
       );
 
-      console.log("OCR Result:", result.data.text);
+      const extractedText = result.data.text;
+      const ticketCode = extractTicketCode(extractedText);
       
-      // Extract ticket code from OCR result
-      // Assuming ticket codes are alphanumeric sequences
-      const extractedCode = extractTicketCode(result.data.text);
-      
-      if (extractedCode) {
-        toast.success(`Ticket code detected: ${extractedCode}`);
-        setManualCode(extractedCode);
-        setData(extractedCode);
+      if (ticketCode && ticketCode !== lastScannedCode) {
+        console.log("✅ Detected ticket code:", ticketCode);
+        setLastScannedCode(ticketCode);
+        setData(ticketCode);
+        setOcrStatus(`Found: ${ticketCode}`);
         
-        // Automatically process the ticket
-        await processTicket(extractedCode);
+        // Automatically verify the ticket
+        await processTicket(ticketCode);
+        
+        // Clear last scanned after 5 seconds to allow re-scanning
+        setTimeout(() => {
+          setLastScannedCode("");
+          setOcrStatus("Ready for next ticket");
+        }, 5000);
       } else {
-        toast.warning("No valid ticket code found in image. Please try again or enter manually.");
+        setOcrStatus("Looking for ticket code...");
       }
     } catch (error) {
       console.error("OCR Error:", error);
-      toast.error("Failed to process image. Please try again.");
-    } finally {
-      setIsOcrProcessing(false);
-      setOcrProgress(0);
+      setOcrStatus("Scanning...");
     }
   };
 
+  // Extract ticket code from text
   const extractTicketCode = (text) => {
-    // Remove whitespace and clean the text
+    if (!text) return null;
+    
+    // Remove all whitespace and convert to uppercase
     const cleanedText = text.replace(/\s+/g, "").toUpperCase();
     
-    // Pattern 1: Look for alphanumeric sequences (e.g., ABC123XYZ, 1234567890)
-    // Adjust the pattern based on your ticket code format
+    // Try multiple patterns to find ticket codes
     const patterns = [
-      /[A-Z0-9]{8,}/g,           // Alphanumeric, 8+ characters
-      /[0-9]{6,}/g,              // Numeric only, 6+ digits
-      /[A-Z]{2,}[0-9]{4,}/g,     // Letters followed by numbers
-      /[0-9]{4,}[A-Z]{2,}/g,     // Numbers followed by letters
+      /\b[A-Z0-9]{8,}\b/g,           // 8+ alphanumeric characters
+      /\b\d{6,}\b/g,                 // 6+ digits only
+      /\b[A-Z]{2,}\d{4,}\b/g,        // Letters + Numbers
+      /\b\d{4,}[A-Z]{2,}\b/g,        // Numbers + Letters
     ];
     
     for (const pattern of patterns) {
       const matches = cleanedText.match(pattern);
       if (matches && matches.length > 0) {
-        // Return the longest match (likely the ticket code)
-        return matches.sort((a, b) => b.length - a.length)[0];
-      }
-    }
-    
-    // If no pattern matched, try to extract the longest alphanumeric sequence
-    const allMatches = cleanedText.match(/[A-Z0-9]+/g);
-    if (allMatches && allMatches.length > 0) {
-      const longestMatch = allMatches.sort((a, b) => b.length - a.length)[0];
-      if (longestMatch.length >= 6) {
+        // Return the longest match (most likely to be the ticket code)
+        const longestMatch = matches.sort((a, b) => b.length - a.length)[0];
         return longestMatch;
       }
     }
     
     return null;
-  };
-
-  const retakePhoto = () => {
-    setCapturedImage(null);
-    setData("");
-    setResult(null);
   };
 
   // Sound effects
@@ -394,7 +396,6 @@ const TicketScanner = () => {
         setResult(responseData);
         updateStats(responseData.status);
 
-        // Add to scan history
         const newScan = {
           code: ticketCode,
           result: responseData,
@@ -402,7 +403,6 @@ const TicketScanner = () => {
         };
         setScanHistory((prev) => [newScan, ...prev]);
 
-        // Update event info if available
         if (responseData.verificationResult?.event) {
           setEventInfo(responseData.verificationResult.event);
         }
@@ -435,12 +435,14 @@ const TicketScanner = () => {
       updateStats("invalid");
     } finally {
       setIsLoading(false);
-      setTimeout(() => {
-        if (scanMode === "camera") {
+      
+      // Auto-clear result after 5 seconds for continuous scanning
+      if (scanMode === "ocr" || scanMode === "camera") {
+        setTimeout(() => {
           setResult(null);
           setData("");
-        }
-      }, 5000);
+        }, 5000);
+      }
     }
   };
 
@@ -514,30 +516,19 @@ const TicketScanner = () => {
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              <button
-                  onClick={() => setSoundEnabled(!soundEnabled)}
-                  className={`p-2 rounded-lg transition-all ${
-                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
-                </button>
-                <button
+            <button
               onClick={handleLogout}
               className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
             >
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Logout</span>
             </button>
-            </div>
-            
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py- text-gray-800">
         {/* Event Info Banner */}
         {eventInfo && (
           <div className="mb-6 bg-gradient-to-r from-orange-500 to-blue-500 rounded-2xl shadow-lg p-6 text-white">
@@ -569,14 +560,13 @@ const TicketScanner = () => {
           <div className="lg:col-span-2 space-y-6">
             {/* Mode Selection */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
-              <h3 className="text-lg font-bold text-gray-800 mb-2">Scanning Mode</h3>
+              <h3 className="text-lg font-bold text-gray-800 mb-4">Scanning Mode</h3>
               <div className="grid grid-cols-3 gap-3">
                 <button
                   onClick={() => {
                     setScanMode("camera");
                     setScanning(true);
-                    setCapturedImage(null);
-                    stopCamera();
+                    stopOcrCamera();
                   }}
                   className={`p-4 rounded-lg border-2 transition-all ${
                     scanMode === "camera"
@@ -591,8 +581,7 @@ const TicketScanner = () => {
                   onClick={() => {
                     setScanMode("ocr");
                     setScanning(false);
-                    setCapturedImage(null);
-                    stopCamera();
+                    startOcrCamera();
                   }}
                   className={`p-4 rounded-lg border-2 transition-all ${
                     scanMode === "ocr"
@@ -600,15 +589,14 @@ const TicketScanner = () => {
                       : "border-gray-200 hover:border-blue-300"
                   }`}
                 >
-                  <FileImage className="h-6 w-6 mx-auto mb-2 text-blue-500" />
+                  <Camera className="h-6 w-6 mx-auto mb-2 text-blue-500" />
                   <p className="text-sm font-semibold text-gray-700">OCR Scan</p>
                 </button>
                 <button
                   onClick={() => {
                     setScanMode("manual");
                     setScanning(false);
-                    setCapturedImage(null);
-                    stopCamera();
+                    stopOcrCamera();
                   }}
                   className={`p-4 rounded-lg border-2 transition-all ${
                     scanMode === "manual"
@@ -621,6 +609,18 @@ const TicketScanner = () => {
                 </button>
               </div>
 
+              {/* Settings */}
+              <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
+                <span className="text-sm font-medium text-gray-700">Sound Effects</span>
+                <button
+                  onClick={() => setSoundEnabled(!soundEnabled)}
+                  className={`p-2 rounded-lg transition-all ${
+                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+                </button>
+              </div>
             </div>
 
             {/* Scanner Interface */}
@@ -640,7 +640,7 @@ const TicketScanner = () => {
                         }`}
                       >
                         {scanning ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                        {scanning ? "Stop" : "Start"} Scanner
+                        {scanning ? "Stop" : "Start"}
                       </button>
                     </div>
                     <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
@@ -654,7 +654,7 @@ const TicketScanner = () => {
                         <div className="absolute inset-0 flex items-center justify-center">
                           <div className="text-center text-white">
                             <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                            <p className="text-lg font-semibold">Click Start Scanner to begin</p>
+                            <p className="text-lg font-semibold">Click Start to begin scanning</p>
                           </div>
                         </div>
                       )}
@@ -667,122 +667,83 @@ const TicketScanner = () => {
                   </div>
                 )}
 
-                {/* OCR Scanner Mode */}
+                {/* OCR Scanner Mode - Continuous Camera */}
                 {scanMode === "ocr" && (
                   <div>
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-bold text-gray-800">OCR Scanner</h3>
-                      <div className="flex gap-2">
-                        {!capturedImage && (
-                          <>
-                            <button
-                              onClick={isCameraActive ? captureImage : startCamera}
-                              disabled={isOcrProcessing}
-                              className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold transition-all flex items-center gap-2 disabled:opacity-50"
-                            >
-                              <Camera className="h-4 w-4" />
-                              {isCameraActive ? "Capture" : "Start Camera"}
-                            </button>
-                            <label className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold transition-all flex items-center gap-2 cursor-pointer">
-                              <Upload className="h-4 w-4" />
-                              Upload
-                              <input
-                                type="file"
-                                accept="image/*"
-                                onChange={handleFileUpload}
-                                className="hidden"
-                                disabled={isOcrProcessing}
-                              />
-                            </label>
-                          </>
-                        )}
-                        {capturedImage && (
-                          <button
-                            onClick={retakePhoto}
-                            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-semibold transition-all"
-                          >
-                            Retake
-                          </button>
-                        )}
-                        {isCameraActive && !capturedImage && (
-                          <button
-                            onClick={stopCamera}
-                            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
-                          >
-                            Stop Camera
-                          </button>
-                        )}
-                      </div>
+                      <button
+                        onClick={ocrScanning ? stopOcrCamera : startOcrCamera}
+                        className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
+                          ocrScanning
+                            ? "bg-red-500 hover:bg-red-600 text-white"
+                            : "bg-blue-500 hover:bg-blue-600 text-white"
+                        }`}
+                      >
+                        {ocrScanning ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                        {ocrScanning ? "Stop" : "Start"}
+                      </button>
                     </div>
 
                     <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
-                      {/* Live Camera View */}
-                      {isCameraActive && !capturedImage && (
-                        <video
-                          ref={videoRef}
-                          autoPlay
-                          playsInline
-                          className="w-full h-full object-cover"
-                        />
-                      )}
+                      {/* Live Camera Feed */}
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover"
+                      />
 
-                      {/* Captured Image */}
-                      {capturedImage && (
-                        <img
-                          src={capturedImage}
-                          alt="Captured ticket"
-                          className="w-full h-full object-contain"
-                        />
+                      {/* Hidden canvas for capturing frames */}
+                      <canvas ref={canvasRef} className="hidden" />
+
+                      {/* Status Overlay */}
+                      <div className="absolute top-4 left-4 right-4 bg-black bg-opacity-70 text-white px-4 py-2 rounded-lg">
+                        <div className="flex items-center gap-2">
+                          {ocrScanning ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Camera className="h-4 w-4" />
+                          )}
+                          <span className="text-sm font-semibold">{ocrStatus}</span>
+                        </div>
+                      </div>
+
+                      {/* Processing Overlay */}
+                      {isLoading && (
+                        <div className="absolute inset-0 bg-black bg-opacity-75 flex items-center justify-center">
+                          <div className="text-center text-white">
+                            <Loader2 className="h-12 w-12 mx-auto mb-2 animate-spin" />
+                            <p className="text-sm">Verifying ticket...</p>
+                          </div>
+                        </div>
                       )}
 
                       {/* Default State */}
-                      {!isCameraActive && !capturedImage && (
+                      {!ocrScanning && !ocrStream && (
                         <div className="absolute inset-0 flex items-center justify-center">
                           <div className="text-center text-white">
-                            <FileImage className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                            <p className="text-lg font-semibold mb-2">
-                              Start camera or upload image
-                            </p>
-                            <p className="text-sm opacity-75">
-                              System will automatically extract ticket code
-                            </p>
+                            <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                            <p className="text-lg font-semibold mb-2">Click Start to scan tickets</p>
+                            <p className="text-sm opacity-75">Point camera at ticket code</p>
                           </div>
                         </div>
                       )}
-
-                      {/* OCR Processing Overlay */}
-                      {isOcrProcessing && (
-                        <div className="absolute inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center">
-                          <Loader2 className="h-12 w-12 text-white animate-spin mb-4" />
-                          <p className="text-white text-lg font-semibold mb-2">
-                            Processing Image...
-                          </p>
-                          <div className="w-64 bg-gray-700 rounded-full h-3 overflow-hidden">
-                            <div
-                              className="bg-blue-500 h-full transition-all duration-300"
-                              style={{ width: `${ocrProgress}%` }}
-                            />
-                          </div>
-                          <p className="text-white text-sm mt-2">{ocrProgress}%</p>
-                        </div>
-                      )}
-
-                      {/* Hidden canvas for image capture */}
-                      <canvas ref={canvasRef} className="hidden" />
                     </div>
 
                     {/* OCR Instructions */}
                     <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
                       <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
                         <AlertCircle className="h-5 w-5" />
-                        OCR Tips for Best Results:
+                        OCR Scanning Tips:
                       </h4>
                       <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-                        <li>Ensure good lighting on the ticket</li>
-                        <li>Keep the ticket code clear and in focus</li>
-                        <li>Avoid shadows or glare on the code</li>
-                        <li>Position the code straight (not tilted)</li>
-                        <li>Fill most of the frame with the ticket</li>
+                        <li>Point camera directly at ticket code</li>
+                        <li>Hold steady for 2-3 seconds</li>
+                        <li>Ensure good lighting</li>
+                        <li>Keep code in center of frame</li>
+                        <li>System scans automatically!</li>
                       </ul>
                     </div>
                   </div>
@@ -815,16 +776,13 @@ const TicketScanner = () => {
                         Verify
                       </button>
                     </div>
-                    <p className="text-sm text-gray-600 mt-2">
-                      Enter the ticket code manually and press Verify or Enter
-                    </p>
                   </div>
                 )}
 
                 {/* Scanned Data Display */}
                 {data && (
                   <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <p className="text-sm text-gray-600 mb-1">Scanned Code:</p>
+                    <p className="text-sm text-gray-600 mb-1">Ticket Code:</p>
                     <p className="text-xl font-mono font-bold text-gray-900 break-all">
                       {data}
                     </p>
