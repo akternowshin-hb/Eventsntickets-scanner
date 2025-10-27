@@ -237,10 +237,7 @@ const ModeratorLogin = () => {
           </form>
         </div>
 
-        {/* <div className="absolute bottom-6 text-center w-full text-sm text-white/70">
-          <p>© 2025 Ticket Scanner System</p>
-          <p className="mt-1">Secure Moderator Access</p>
-        </div> */}
+        
       </div>
     </>
   );
