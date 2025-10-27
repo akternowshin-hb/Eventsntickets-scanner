@@ -559,9 +559,9 @@ const TicketScanner = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-white to-blue-50">
+    <div className="min-h-screen text-gray-800 bg-gradient-to-br from-orange-50 via-white to-blue-50">
       {/* Header */}
-      <div className="bg-white shadow-md sticky top-0 z-50">
+      <div className="bg-white shadow-md sticky top-0 z-50 ">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between py-4">
             <div className="flex items-center gap-3">
@@ -569,17 +569,28 @@ const TicketScanner = () => {
               <div>
                 <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Ticket Scanner</h1>
                 {moderatorData && (
-                  <p className="text-xs text-gray-600">Moderator: {moderatorData.name}</p>
+                  <p className="text-xs text-gray-600 flex items-center"><Shield className="w-4 h-4"></Shield>  {moderatorData.name}</p>
                 )}
               </div>
             </div>
-            <button
+            <div className="flex gap-3 items-center">
+                <button
+                  onClick={() => setSoundEnabled(!soundEnabled)}
+                  className={`p-2 rounded-lg transition-all ${
+                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+                </button>
+                <button
               onClick={handleLogout}
               className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
             >
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Logout</span>
             </button>
+              </div>
+            
           </div>
         </div>
       </div>
@@ -618,8 +629,8 @@ const TicketScanner = () => {
             {/* Mode Selection */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <h3 className="text-lg font-bold text-gray-800 mb-4">Scanning Mode</h3>
-              <div className="grid grid-cols-3 gap-3">
-                <button
+              <div className="grid grid-cols-2 gap-3">
+                {/* <button
                   onClick={() => {
                     setScanMode("camera");
                     setScanning(true);
@@ -633,7 +644,7 @@ const TicketScanner = () => {
                 >
                   <Scan className="h-6 w-6 mx-auto mb-2 text-orange-500" />
                   <p className="text-sm font-semibold text-gray-700">Barcode</p>
-                </button>
+                </button> */}
                 <button
                   onClick={() => {
                     setScanMode("ocr");
@@ -646,8 +657,8 @@ const TicketScanner = () => {
                       : "border-gray-200 hover:border-blue-300"
                   }`}
                 >
-                  <Camera className="h-6 w-6 mx-auto mb-2 text-blue-500" />
-                  <p className="text-sm font-semibold text-gray-700">OCR Scan</p>
+                  <Scan className="h-6 w-6 mx-auto mb-2 text-blue-500" />
+                  <p className="text-sm font-semibold text-gray-700">Barcode</p>
                 </button>
                 <button
                   onClick={() => {
@@ -666,17 +677,7 @@ const TicketScanner = () => {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
-                <span className="text-sm font-medium text-gray-700">Sound Effects</span>
-                <button
-                  onClick={() => setSoundEnabled(!soundEnabled)}
-                  className={`p-2 rounded-lg transition-all ${
-                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
-                </button>
-              </div>
+              
             </div>
 
             {/* Scanner Interface */}
