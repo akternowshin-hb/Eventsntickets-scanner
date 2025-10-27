@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import BarcodeScannerComponent from "react-qr-barcode-scanner";
-import Tesseract from "tesseract.js";
 import {
   CheckCircle,
   XCircle,
@@ -97,7 +96,7 @@ const TicketScanner = () => {
     if (ocrScanning && videoRef.current && videoRef.current.readyState === 4) {
       scanIntervalRef.current = setInterval(() => {
         captureAndScan();
-      }, 2000); // Scan every 2 seconds
+      }, 3000); // Scan every 3 seconds
     } else {
       if (scanIntervalRef.current) {
         clearInterval(scanIntervalRef.current);
@@ -174,13 +173,13 @@ const TicketScanner = () => {
   // Start OCR Camera with continuous feed
   const startOcrCamera = async () => {
     try {
-      stopOcrCamera(); // Stop any existing stream
+      stopOcrCamera();
       
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         }
       });
       
@@ -190,11 +189,10 @@ const TicketScanner = () => {
         videoRef.current.srcObject = mediaStream;
         videoRef.current.play();
         
-        // Wait for video to be ready
         videoRef.current.onloadedmetadata = () => {
           setOcrScanning(true);
-          setOcrStatus("Camera active - Point at ticket");
-          toast.success("Camera started - Hold ticket steady");
+          setOcrStatus("Camera active - Point at ticket code");
+          toast.success("OCR Camera started - Focus on ticket code");
         };
       }
     } catch (error) {
@@ -223,7 +221,7 @@ const TicketScanner = () => {
     setOcrStatus("Camera stopped");
   };
 
-  // Capture and scan automatically
+  // Capture and scan with OCR.space API
   const captureAndScan = async () => {
     if (!videoRef.current || !canvasRef.current || isLoading) {
       return;
@@ -232,61 +230,77 @@ const TicketScanner = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
-    // Check if video is ready
     if (video.readyState !== 4) {
       return;
     }
 
     const context = canvas.getContext("2d");
-    
-    // Set canvas size to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
-    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Convert to blob
+    // Convert canvas to blob
     canvas.toBlob(async (blob) => {
       if (blob) {
         setOcrStatus("Scanning...");
         await processImageWithOCR(blob);
       }
-    }, "image/jpeg", 0.8);
+    }, "image/jpeg", 0.9);
   };
 
-  // Process image with OCR
+  // Process image with OCR.space API (FREE!)
   const processImageWithOCR = async (imageBlob) => {
     if (isLoading) return;
 
     try {
-      const result = await Tesseract.recognize(
-        imageBlob,
-        "eng",
-        {
-          logger: () => {}, // Silent logging for continuous scanning
-        }
-      );
+      // Create FormData for OCR.space API
+      const formData = new FormData();
+      formData.append("base64Image", await blobToBase64(imageBlob));
+      formData.append("apikey", "K87899142388957"); // FREE API KEY
+      formData.append("language", "eng");
+      formData.append("isOverlayRequired", "false");
+      formData.append("detectOrientation", "true");
+      formData.append("scale", "true");
+      formData.append("OCREngine", "2"); // Engine 2 is better
 
-      const extractedText = result.data.text;
-      const ticketCode = extractTicketCode(extractedText);
+      // Call OCR.space API
+      const response = await fetch("https://api.ocr.space/parse/image", {
+        method: "POST",
+        body: formData,
+      });
+
+      const ocrResult = await response.json();
       
-      if (ticketCode && ticketCode !== lastScannedCode) {
-        console.log("✅ Detected ticket code:", ticketCode);
-        setLastScannedCode(ticketCode);
-        setData(ticketCode);
-        setOcrStatus(`Found: ${ticketCode}`);
+      console.log("🔍 OCR Result:", ocrResult);
+
+      if (ocrResult.IsErroredOnProcessing) {
+        setOcrStatus("Error scanning - try again");
+        return;
+      }
+
+      if (ocrResult.ParsedResults && ocrResult.ParsedResults.length > 0) {
+        const extractedText = ocrResult.ParsedResults[0].ParsedText;
+        console.log("📝 Extracted text:", extractedText);
         
-        // Automatically verify the ticket
-        await processTicket(ticketCode);
+        const ticketCode = extractTicketCode(extractedText);
         
-        // Clear last scanned after 5 seconds to allow re-scanning
-        setTimeout(() => {
-          setLastScannedCode("");
-          setOcrStatus("Ready for next ticket");
-        }, 5000);
-      } else {
-        setOcrStatus("Looking for ticket code...");
+        if (ticketCode && ticketCode !== lastScannedCode) {
+          console.log("✅ Detected ticket code:", ticketCode);
+          setLastScannedCode(ticketCode);
+          setData(ticketCode);
+          setOcrStatus(`Found: ${ticketCode}`);
+          
+          // Automatically verify the ticket
+          await processTicket(ticketCode);
+          
+          // Clear last scanned after 5 seconds
+          setTimeout(() => {
+            setLastScannedCode("");
+            setOcrStatus("Ready for next ticket");
+          }, 5000);
+        } else {
+          setOcrStatus("Looking for ticket code...");
+        }
       }
     } catch (error) {
       console.error("OCR Error:", error);
@@ -294,27 +308,57 @@ const TicketScanner = () => {
     }
   };
 
-  // Extract ticket code from text
+  // Convert blob to base64 for OCR.space API
+  const blobToBase64 = (blob) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // Remove data URL prefix to get just base64 string
+        const base64 = reader.result.split(',')[1];
+        resolve("data:image/jpeg;base64," + base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  // Extract ticket code from OCR text
   const extractTicketCode = (text) => {
     if (!text) return null;
     
-    // Remove all whitespace and convert to uppercase
-    const cleanedText = text.replace(/\s+/g, "").toUpperCase();
+    // Clean text - remove whitespace and special chars
+    const cleanedText = text.replace(/[\s\r\n]+/g, "").toUpperCase();
     
-    // Try multiple patterns to find ticket codes
+    console.log("🧹 Cleaned text:", cleanedText);
+    
+    // CUSTOMIZE THESE PATTERNS FOR YOUR TICKET FORMAT
     const patterns = [
-      /\b[A-Z0-9]{8,}\b/g,           // 8+ alphanumeric characters
-      /\b\d{6,}\b/g,                 // 6+ digits only
-      /\b[A-Z]{2,}\d{4,}\b/g,        // Letters + Numbers
-      /\b\d{4,}[A-Z]{2,}\b/g,        // Numbers + Letters
+      /\b[A-Z0-9]{10,}\b/g,          // 10+ alphanumeric (most ticket codes)
+      /\b[A-Z0-9]{8,}\b/g,           // 8+ alphanumeric
+      /\b\d{8,}\b/g,                 // 8+ digits only
+      /\b[A-Z]{2,}\d{6,}\b/g,        // Letters + 6+ numbers
+      /\b\d{6,}[A-Z]{2,}\b/g,        // 6+ numbers + letters
     ];
     
     for (const pattern of patterns) {
       const matches = cleanedText.match(pattern);
       if (matches && matches.length > 0) {
-        // Return the longest match (most likely to be the ticket code)
-        const longestMatch = matches.sort((a, b) => b.length - a.length)[0];
-        return longestMatch;
+        // Filter out common garbage patterns
+        const validMatches = matches.filter(match => {
+          // Must have at least some numbers
+          const hasNumbers = /\d/.test(match);
+          // Should not be all same character
+          const notAllSame = !/^(.)\1+$/.test(match);
+          // Minimum length 6
+          const longEnough = match.length >= 6;
+          
+          return hasNumbers && notAllSame && longEnough;
+        });
+        
+        if (validMatches.length > 0) {
+          // Return longest valid match
+          return validMatches.sort((a, b) => b.length - a.length)[0];
+        }
       }
     }
     
@@ -369,80 +413,93 @@ const TicketScanner = () => {
     }
   };
 
-  const processTicket = async (ticketCode) => {
-    if (!ticketCode || isLoading) return;
+  const processTicket = async (code) => {
+    if (!code || isLoading) return;
 
+    setData(code);
+    setScanning(false);
     setIsLoading(true);
-    setData(ticketCode);
 
     try {
-      const response = await fetch(`${serverURL.url}moderator/verify-ticket`, {
+      console.log("🔍 Scanning ticket:", code);
+
+      const response = await fetch(`${serverURL.url}moderator/scan-ticket`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${moderatorToken}`,
         },
         body: JSON.stringify({
-          ticketCode: ticketCode,
-          moderatorId: moderatorData._id || moderatorData.id,
+          ticketCode: code,
+          moderatorId: moderatorData?._id || moderatorData?.id,
         }),
       });
 
-      const responseData = await response.json();
-      console.log("Verification response:", responseData);
+      const responseText = await response.text();
+      console.log("📥 API Response:", responseText);
 
-      if (response.ok) {
+      let ticketResult;
+      try {
+        ticketResult = JSON.parse(responseText);
+      } catch (parseError) {
+        throw new Error("Invalid response from server");
+      }
+
+      if (ticketResult.verificationResult?.event && !eventInfo) {
+        setEventInfo(ticketResult.verificationResult.event);
+      }
+
+      const formattedResult = {
+        status: ticketResult.status,
+        message: ticketResult.message,
+        scanTime: new Date().toLocaleString(),
+        verificationResult: ticketResult.verificationResult,
+      };
+
+      setResult(formattedResult);
+      updateStats(ticketResult.status);
+
+      if (ticketResult.status === "valid") {
         playSound("success");
-        setResult(responseData);
-        updateStats(responseData.status);
-
-        const newScan = {
-          code: ticketCode,
-          result: responseData,
-          timestamp: new Date(),
-        };
-        setScanHistory((prev) => [newScan, ...prev]);
-
-        if (responseData.verificationResult?.event) {
-          setEventInfo(responseData.verificationResult.event);
-        }
-
-        toast.success(responseData.message);
+        toast.success("✅ Valid Ticket!");
       } else {
         playSound("error");
-        setResult(responseData);
-        updateStats(responseData.status || "invalid");
-
-        const newScan = {
-          code: ticketCode,
-          result: responseData,
-          timestamp: new Date(),
-        };
-        setScanHistory((prev) => [newScan, ...prev]);
-
-        toast.error(responseData.message || "Ticket verification failed");
+        if (ticketResult.status === "used") {
+          toast.warning("⚠️ Ticket Already Used");
+        } else {
+          toast.error("❌ Invalid Ticket");
+        }
       }
+
+      setScanHistory((prev) => [
+        {
+          code,
+          result: formattedResult,
+          timestamp: new Date(),
+        },
+        ...prev.slice(0, 19),
+      ]);
     } catch (error) {
-      console.error("Error verifying ticket:", error);
-      playSound("error");
-      toast.error("Network error. Please try again.");
-      
+      console.error("❌ Error verifying ticket:", error);
       const errorResult = {
         status: "invalid",
-        message: "Network error occurred",
+        message: error.message || "Server Error",
+        scanTime: new Date().toLocaleString(),
       };
       setResult(errorResult);
       updateStats("invalid");
+      playSound("error");
+      toast.error("Error scanning ticket");
     } finally {
       setIsLoading(false);
-      
-      // Auto-clear result after 5 seconds for continuous scanning
-      if (scanMode === "ocr" || scanMode === "camera") {
-        setTimeout(() => {
+
+      setTimeout(() => {
+        if (scanMode === "camera") {
+          setScanning(true);
           setResult(null);
           setData("");
-        }, 5000);
-      }
+        }
+      }, 3000);
     }
   };
 
@@ -528,7 +585,7 @@ const TicketScanner = () => {
       </div>
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py- text-gray-800">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {/* Event Info Banner */}
         {eventInfo && (
           <div className="mb-6 bg-gradient-to-r from-orange-500 to-blue-500 rounded-2xl shadow-lg p-6 text-white">
@@ -549,7 +606,7 @@ const TicketScanner = () => {
               </div>
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4" />
-                <span>Secure Verification</span>
+                <span>OCR.space Powered</span>
               </div>
             </div>
           </div>
@@ -609,7 +666,6 @@ const TicketScanner = () => {
                 </button>
               </div>
 
-              {/* Settings */}
               <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
                 <span className="text-sm font-medium text-gray-700">Sound Effects</span>
                 <button
@@ -654,7 +710,7 @@ const TicketScanner = () => {
                         <div className="absolute inset-0 flex items-center justify-center">
                           <div className="text-center text-white">
                             <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                            <p className="text-lg font-semibold">Click Start to begin scanning</p>
+                            <p className="text-lg font-semibold">Click Start to begin</p>
                           </div>
                         </div>
                       )}
@@ -667,11 +723,11 @@ const TicketScanner = () => {
                   </div>
                 )}
 
-                {/* OCR Scanner Mode - Continuous Camera */}
+                {/* OCR Scanner Mode */}
                 {scanMode === "ocr" && (
                   <div>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-bold text-gray-800">OCR Scanner</h3>
+                      <h3 className="text-lg font-bold text-gray-800">OCR Scanner (OCR.space)</h3>
                       <button
                         onClick={ocrScanning ? stopOcrCamera : startOcrCamera}
                         className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
@@ -686,7 +742,6 @@ const TicketScanner = () => {
                     </div>
 
                     <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
-                      {/* Live Camera Feed */}
                       <video
                         ref={videoRef}
                         autoPlay
@@ -694,11 +749,8 @@ const TicketScanner = () => {
                         muted
                         className="w-full h-full object-cover"
                       />
-
-                      {/* Hidden canvas for capturing frames */}
                       <canvas ref={canvasRef} className="hidden" />
 
-                      {/* Status Overlay */}
                       <div className="absolute top-4 left-4 right-4 bg-black bg-opacity-70 text-white px-4 py-2 rounded-lg">
                         <div className="flex items-center gap-2">
                           {ocrScanning ? (
@@ -710,7 +762,6 @@ const TicketScanner = () => {
                         </div>
                       </div>
 
-                      {/* Processing Overlay */}
                       {isLoading && (
                         <div className="absolute inset-0 bg-black bg-opacity-75 flex items-center justify-center">
                           <div className="text-center text-white">
@@ -720,30 +771,28 @@ const TicketScanner = () => {
                         </div>
                       )}
 
-                      {/* Default State */}
                       {!ocrScanning && !ocrStream && (
                         <div className="absolute inset-0 flex items-center justify-center">
                           <div className="text-center text-white">
                             <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                            <p className="text-lg font-semibold mb-2">Click Start to scan tickets</p>
-                            <p className="text-sm opacity-75">Point camera at ticket code</p>
+                            <p className="text-lg font-semibold mb-2">Click Start</p>
+                            <p className="text-sm opacity-75">OCR.space API (FREE!)</p>
                           </div>
                         </div>
                       )}
                     </div>
 
-                    {/* OCR Instructions */}
                     <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
                       <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
                         <AlertCircle className="h-5 w-5" />
-                        OCR Scanning Tips:
+                        OCR Tips (OCR.space API):
                       </h4>
                       <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-                        <li>Point camera directly at ticket code</li>
-                        <li>Hold steady for 2-3 seconds</li>
-                        <li>Ensure good lighting</li>
-                        <li>Keep code in center of frame</li>
-                        <li>System scans automatically!</li>
+                        <li>Point directly at ticket code</li>
+                        <li>Hold steady for 3 seconds</li>
+                        <li>Good lighting required</li>
+                        <li>Auto-scans every 3 seconds</li>
+                        <li>Much better than Tesseract!</li>
                       </ul>
                     </div>
                   </div>
@@ -779,7 +828,6 @@ const TicketScanner = () => {
                   </div>
                 )}
 
-                {/* Scanned Data Display */}
                 {data && (
                   <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
                     <p className="text-sm text-gray-600 mb-1">Ticket Code:</p>
@@ -816,7 +864,6 @@ const TicketScanner = () => {
                   <>
                     <div className="border-t border-gray-200 my-4"></div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {/* Buyer Information */}
                       <div className="space-y-3">
                         <h4 className="font-semibold text-gray-700 flex items-center gap-2">
                           <User className="h-4 w-4 text-orange-500" />
@@ -844,7 +891,6 @@ const TicketScanner = () => {
                         </div>
                       </div>
 
-                      {/* Event Information */}
                       <div className="space-y-3">
                         <h4 className="font-semibold text-gray-700 flex items-center gap-2">
                           <Calendar className="h-4 w-4 text-orange-500" />
@@ -883,7 +929,6 @@ const TicketScanner = () => {
                       </div>
                     </div>
 
-                    {/* Scan Information */}
                     <div className="border-t border-gray-200 my-4"></div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                       <div>
@@ -913,7 +958,6 @@ const TicketScanner = () => {
 
           {/* Right Column - Stats & History */}
           <div className="space-y-4 sm:space-y-6">
-            {/* Stats Card */}
             <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-6">
               <h3 className="text-lg sm:text-xl font-bold text-gray-800 mb-4">Today's Stats</h3>
               <div className="grid grid-cols-2 gap-3 sm:gap-4">
@@ -943,7 +987,6 @@ const TicketScanner = () => {
               </button>
             </div>
 
-            {/* Recent Scans */}
             {scanHistory.length > 0 && (
               <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-6">
                 <h3 className="text-lg sm:text-xl font-bold text-gray-800 mb-4">Recent Scans</h3>
