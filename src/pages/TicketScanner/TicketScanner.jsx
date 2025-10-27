@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import BarcodeScannerComponent from "react-qr-barcode-scanner";
+import Tesseract from "tesseract.js";
 import {
   CheckCircle,
   XCircle,
@@ -21,6 +22,8 @@ import {
   Shield,
   AlertCircle,
   Camera,
+  FileImage,
+  Upload,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import serverURL from "../../ServerConfig";
@@ -28,6 +31,8 @@ import logo from "../../assets/logo.png";
 
 const TicketScanner = () => {
   const navigate = useNavigate();
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
   
   // Get moderator data from localStorage
   const [moderatorData, setModeratorData] = useState(null);
@@ -36,7 +41,7 @@ const TicketScanner = () => {
   // Scanner states
   const [data, setData] = useState("");
   const [result, setResult] = useState(null);
-  const [scanning, setScanning] = useState(false); // Changed default to false
+  const [scanning, setScanning] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [scanHistory, setScanHistory] = useState([]);
   const [stats, setStats] = useState({
@@ -48,8 +53,15 @@ const TicketScanner = () => {
   
   // Settings states
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [scanMode, setScanMode] = useState("camera"); // 'camera' or 'manual'
+  const [scanMode, setScanMode] = useState("camera"); // 'camera', 'manual', 'ocr'
   const [manualCode, setManualCode] = useState("");
+  
+  // OCR states
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+  const [capturedImage, setCapturedImage] = useState(null);
+  const [stream, setStream] = useState(null);
+  const [isCameraActive, setIsCameraActive] = useState(false);
   
   // Event info state
   const [eventInfo, setEventInfo] = useState(null);
@@ -76,6 +88,13 @@ const TicketScanner = () => {
     }
   }, [navigate]);
 
+  // Cleanup camera stream on unmount or mode change
+  useEffect(() => {
+    return () => {
+      stopCamera();
+    };
+  }, []);
+
   // Fetch today's stats from API
   const fetchTodayStats = async (moderatorId, token) => {
     try {
@@ -91,7 +110,6 @@ const TicketScanner = () => {
         const data = await response.json();
         console.log("📊 Stats from API:", data);
         
-        // Update stats from API response
         if (data.stats) {
           setStats({
             totalScanned: data.stats.totalScanned || 0,
@@ -121,7 +139,6 @@ const TicketScanner = () => {
         const data = await response.json();
         console.log("📜 Recent scans from API:", data);
         
-        // Update scan history from API response
         if (data.recentScans && Array.isArray(data.recentScans)) {
           const formattedHistory = data.recentScans.map(scan => ({
             code: scan.ticketCode,
@@ -135,7 +152,6 @@ const TicketScanner = () => {
           setScanHistory(formattedHistory);
         }
 
-        // Set event info if available
         if (data.recentScans && data.recentScans.length > 0 && data.recentScans[0].verificationResult?.event) {
           setEventInfo(data.recentScans[0].verificationResult.event);
         }
@@ -143,6 +159,164 @@ const TicketScanner = () => {
     } catch (error) {
       console.error("❌ Error fetching recent scans:", error);
     }
+  };
+
+  // Camera functions for OCR
+  const startCamera = async () => {
+    try {
+      stopCamera(); // Stop any existing stream first
+      
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment", // Use back camera on mobile
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
+      
+      setStream(mediaStream);
+      setIsCameraActive(true);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+        videoRef.current.play();
+      }
+      
+      toast.success("Camera started successfully");
+    } catch (error) {
+      console.error("Error starting camera:", error);
+      toast.error("Failed to start camera. Please check permissions.");
+    }
+  };
+
+  const stopCamera = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+      setIsCameraActive(false);
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const captureImage = () => {
+    if (!videoRef.current || !canvasRef.current) {
+      toast.error("Camera not ready");
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+
+    // Set canvas dimensions to match video
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    // Draw the video frame to canvas
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Convert canvas to blob
+    canvas.toBlob((blob) => {
+      if (blob) {
+        const imageUrl = URL.createObjectURL(blob);
+        setCapturedImage(imageUrl);
+        processImageWithOCR(imageUrl);
+      }
+    }, "image/jpeg", 0.95);
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file && file.type.startsWith("image/")) {
+      const imageUrl = URL.createObjectURL(file);
+      setCapturedImage(imageUrl);
+      processImageWithOCR(imageUrl);
+    } else {
+      toast.error("Please select a valid image file");
+    }
+  };
+
+  const processImageWithOCR = async (imageUrl) => {
+    setIsOcrProcessing(true);
+    setOcrProgress(0);
+
+    try {
+      const result = await Tesseract.recognize(
+        imageUrl,
+        "eng",
+        {
+          logger: (m) => {
+            if (m.status === "recognizing text") {
+              setOcrProgress(Math.round(m.progress * 100));
+            }
+          },
+        }
+      );
+
+      console.log("OCR Result:", result.data.text);
+      
+      // Extract ticket code from OCR result
+      // Assuming ticket codes are alphanumeric sequences
+      const extractedCode = extractTicketCode(result.data.text);
+      
+      if (extractedCode) {
+        toast.success(`Ticket code detected: ${extractedCode}`);
+        setManualCode(extractedCode);
+        setData(extractedCode);
+        
+        // Automatically process the ticket
+        await processTicket(extractedCode);
+      } else {
+        toast.warning("No valid ticket code found in image. Please try again or enter manually.");
+      }
+    } catch (error) {
+      console.error("OCR Error:", error);
+      toast.error("Failed to process image. Please try again.");
+    } finally {
+      setIsOcrProcessing(false);
+      setOcrProgress(0);
+    }
+  };
+
+  const extractTicketCode = (text) => {
+    // Remove whitespace and clean the text
+    const cleanedText = text.replace(/\s+/g, "").toUpperCase();
+    
+    // Pattern 1: Look for alphanumeric sequences (e.g., ABC123XYZ, 1234567890)
+    // Adjust the pattern based on your ticket code format
+    const patterns = [
+      /[A-Z0-9]{8,}/g,           // Alphanumeric, 8+ characters
+      /[0-9]{6,}/g,              // Numeric only, 6+ digits
+      /[A-Z]{2,}[0-9]{4,}/g,     // Letters followed by numbers
+      /[0-9]{4,}[A-Z]{2,}/g,     // Numbers followed by letters
+    ];
+    
+    for (const pattern of patterns) {
+      const matches = cleanedText.match(pattern);
+      if (matches && matches.length > 0) {
+        // Return the longest match (likely the ticket code)
+        return matches.sort((a, b) => b.length - a.length)[0];
+      }
+    }
+    
+    // If no pattern matched, try to extract the longest alphanumeric sequence
+    const allMatches = cleanedText.match(/[A-Z0-9]+/g);
+    if (allMatches && allMatches.length > 0) {
+      const longestMatch = allMatches.sort((a, b) => b.length - a.length)[0];
+      if (longestMatch.length >= 6) {
+        return longestMatch;
+      }
+    }
+    
+    return null;
+  };
+
+  const retakePhoto = () => {
+    setCapturedImage(null);
+    setData("");
+    setResult(null);
   };
 
   // Sound effects
@@ -193,423 +367,465 @@ const TicketScanner = () => {
     }
   };
 
-  const processTicket = async (code) => {
-    setData(code);
-    setScanning(false);
+  const processTicket = async (ticketCode) => {
+    if (!ticketCode || isLoading) return;
+
     setIsLoading(true);
+    setData(ticketCode);
 
     try {
-      console.log("🔍 Scanning ticket:", code);
-
-      const response = await fetch(`${serverURL.url}moderator/scan-ticket`, {
+      const response = await fetch(`${serverURL.url}moderator/verify-ticket`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${moderatorToken}`,
         },
         body: JSON.stringify({
-          ticketCode: code,
-          moderatorId: moderatorData?._id || moderatorData?.id,
+          ticketCode: ticketCode,
+          moderatorId: moderatorData._id || moderatorData.id,
         }),
       });
 
-      const responseText = await response.text();
-      console.log("📥 API Response:", responseText);
+      const responseData = await response.json();
+      console.log("Verification response:", responseData);
 
-      let ticketResult;
-      try {
-        ticketResult = JSON.parse(responseText);
-      } catch (parseError) {
-        throw new Error("Invalid response from server");
-      }
-
-      // Store event info from first successful scan
-      if (ticketResult.verificationResult?.event && !eventInfo) {
-        setEventInfo(ticketResult.verificationResult.event);
-      }
-
-      // Format the result
-      const formattedResult = {
-        status: ticketResult.status,
-        message: ticketResult.message,
-        scanTime: new Date().toLocaleString(),
-        verificationResult: ticketResult.verificationResult,
-      };
-
-      setResult(formattedResult);
-      updateStats(ticketResult.status);
-
-      // Play sound feedback
-      if (ticketResult.status === "valid") {
+      if (response.ok) {
         playSound("success");
-        toast.success("✅ Valid Ticket!");
+        setResult(responseData);
+        updateStats(responseData.status);
+
+        // Add to scan history
+        const newScan = {
+          code: ticketCode,
+          result: responseData,
+          timestamp: new Date(),
+        };
+        setScanHistory((prev) => [newScan, ...prev]);
+
+        // Update event info if available
+        if (responseData.verificationResult?.event) {
+          setEventInfo(responseData.verificationResult.event);
+        }
+
+        toast.success(responseData.message);
       } else {
         playSound("error");
-        if (ticketResult.status === "used") {
-          toast.warning("⚠️ Ticket Already Used");
-        } else {
-          toast.error("❌ Invalid Ticket");
-        }
-      }
+        setResult(responseData);
+        updateStats(responseData.status || "invalid");
 
-      // Add to scan history
-      setScanHistory((prev) => [
-        {
-          code,
-          result: formattedResult,
+        const newScan = {
+          code: ticketCode,
+          result: responseData,
           timestamp: new Date(),
-        },
-        ...prev.slice(0, 19),
-      ]);
+        };
+        setScanHistory((prev) => [newScan, ...prev]);
+
+        toast.error(responseData.message || "Ticket verification failed");
+      }
     } catch (error) {
-      console.error("❌ Error verifying ticket:", error);
+      console.error("Error verifying ticket:", error);
+      playSound("error");
+      toast.error("Network error. Please try again.");
+      
       const errorResult = {
         status: "invalid",
-        message: error.message || "Server Error",
-        scanTime: new Date().toLocaleString(),
+        message: "Network error occurred",
       };
       setResult(errorResult);
       updateStats("invalid");
-      playSound("error");
-      toast.error("Error scanning ticket");
-    }
-
-    setIsLoading(false);
-
-    // Auto-resume scanning after 3 seconds for camera mode
-    setTimeout(() => {
-      if (scanMode === "camera") {
-        setScanning(true);
-        setResult(null);
-        setData("");
-      }
-    }, 3000);
-  };
-
-  const downloadLogs = () => {
-    // Create a better formatted CSV with proper structure
-    let csvContent = '';
-    
-    // Add Summary Section
-    csvContent += 'SCAN SUMMARY REPORT\n';
-    csvContent += '\n';
-    csvContent += `Report Generated:,${new Date().toLocaleString()}\n`;
-    csvContent += `Moderator:,${moderatorData?.name || 'Unknown'}\n`;
-    csvContent += `Event:,${eventInfo?.title || 'N/A'}\n`;
-    csvContent += '\n';
-    
-    // Add Statistics
-    csvContent += 'STATISTICS\n';
-    csvContent += `Total Scanned:,${stats.totalScanned}\n`;
-    csvContent += `Valid Tickets:,${stats.validTickets}\n`;
-    csvContent += `Already Used:,${stats.usedTickets}\n`;
-    csvContent += `Invalid Tickets:,${stats.invalidTickets}\n`;
-    csvContent += '\n';
-    
-    // Add Detailed Scan History Header
-    csvContent += 'DETAILED SCAN HISTORY\n';
-    csvContent += 'Ticket Code,Status,Buyer Name,Buyer Email,Event Title,Event Date,Event Time,Event Location,Purchase Date,Scan Time,Scanned By\n';
-    
-    // Add scan history data
-    scanHistory.forEach(scan => {
-      const verification = scan.result.verificationResult;
-      
-      // Helper function to clean CSV values
-      const cleanValue = (value) => {
-        if (!value) return 'N/A';
-        const str = String(value);
-        // Wrap in quotes if contains comma, quote, or newline
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return `"${str.replace(/"/g, '""')}"`;
+    } finally {
+      setIsLoading(false);
+      setTimeout(() => {
+        if (scanMode === "camera") {
+          setResult(null);
+          setData("");
         }
-        return str;
-      };
-      
-      const row = [
-        cleanValue(scan.code),
-        cleanValue(scan.result.status.toUpperCase()),
-        cleanValue(verification?.buyer?.name),
-        cleanValue(verification?.buyer?.email),
-        cleanValue(verification?.event?.title),
-        verification?.event?.date ? cleanValue(new Date(verification.event.date).toLocaleDateString()) : 'N/A',
-        cleanValue(verification?.event?.time),
-        cleanValue(verification?.event?.location),
-        verification?.purchaseDate ? cleanValue(new Date(verification.purchaseDate).toLocaleDateString()) : 'N/A',
-        verification?.scanTime ? cleanValue(new Date(verification.scanTime).toLocaleString()) : cleanValue(scan.timestamp.toLocaleString()),
-        cleanValue(verification?.scannedBy || moderatorData?.name)
-      ];
-      
-      csvContent += row.join(',') + '\n';
-    });
-
-    // Create blob and download
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `Scan_Logs_${new Date().toISOString().split('T')[0]}_${new Date().getTime()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    
-    toast.success('CSV file downloaded successfully');
+      }, 5000);
+    }
   };
 
   const handleLogout = () => {
     localStorage.removeItem("moderator-token");
     localStorage.removeItem("moderator-data");
-    toast.info("Logged out successfully");
+    toast.success("Logged out successfully");
     navigate("/");
   };
 
+  const downloadLogs = () => {
+    const logs = scanHistory.map((scan) => ({
+      code: scan.code,
+      status: scan.result.status,
+      message: scan.result.message,
+      timestamp: scan.timestamp.toISOString(),
+      buyer: scan.result.verificationResult?.buyer,
+      event: scan.result.verificationResult?.event,
+    }));
+
+    const dataStr = JSON.stringify(logs, null, 2);
+    const dataBlob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(dataBlob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ticket-scans-${new Date().toISOString().split("T")[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success("Logs downloaded successfully");
+  };
+
   const getStatusIcon = (status) => {
-    if (status === "valid") {
-      return <CheckCircle className="h-6 w-6 text-green-600" />;
-    } else if (status === "used") {
-      return <AlertCircle className="h-6 w-6 text-red-600" />;
+    switch (status) {
+      case "valid":
+        return <CheckCircle className="h-6 w-6 text-green-500 flex-shrink-0" />;
+      case "used":
+        return <XCircle className="h-6 w-6 text-red-500 flex-shrink-0" />;
+      default:
+        return <AlertCircle className="h-6 w-6 text-gray-500 flex-shrink-0" />;
     }
-    return <XCircle className="h-6 w-6 text-gray-600" />;
   };
 
   const getStatusBadge = (status) => {
-    const baseClasses = "px-3 py-1 rounded-full text-xs font-semibold";
-    if (status === "valid") {
-      return <span className={`${baseClasses} bg-green-100 text-green-700`}>VALID</span>;
-    } else if (status === "used") {
-      return <span className={`${baseClasses} bg-red-100 text-red-700`}>USED</span>;
-    }
-    return <span className={`${baseClasses} bg-gray-100 text-gray-700`}>INVALID</span>;
-  };
+    const badges = {
+      valid: "bg-green-100 text-green-800 border-green-200",
+      used: "bg-red-100 text-red-800 border-red-200",
+      invalid: "bg-gray-100 text-gray-800 border-gray-200",
+    };
 
-  const toggleScanMode = (mode) => {
-    setScanMode(mode);
-    setScanning(mode === "camera");
-    setResult(null);
-    setData("");
-    setManualCode("");
-  };
-
-  if (!moderatorData) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 to-orange-100 flex items-center justify-center">
-        <Loader2 className="h-12 w-12 text-orange-500 animate-spin" />
-      </div>
+      <span
+        className={`px-3 py-1 rounded-full text-xs font-semibold border ${badges[status] || badges.invalid}`}
+      >
+        {status.toUpperCase()}
+      </span>
     );
-  }
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-white to-orange-50 text-gray-800">
+    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-white to-blue-50">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-50">
+      <div className="bg-white shadow-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between py-4 gap-4">
-            {/* Logo and Moderator Info */}
-            <div className="flex items-center gap-4">
-              <img src={logo} alt="Logo" className="h-10 w-10 sm:h-12 sm:w-12 object-contain" />
-              <div className="text-center sm:text-left">
+          <div className="flex items-center justify-between py-4">
+            <div className="flex items-center gap-3">
+              <img src={logo} alt="Logo" className="h-10 w-10" />
+              <div>
                 <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Ticket Scanner</h1>
-                <div className="flex items-center gap-2 text-sm text-gray-600">
-                  <Shield className="h-4 w-4 text-orange-500" />
-                  <span className="font-medium">{moderatorData.name}</span>
-                </div>
+                {moderatorData && (
+                  <p className="text-xs text-gray-600">Moderator: {moderatorData.name}</p>
+                )}
               </div>
             </div>
-
-            {/* Controls */}
-            <div className="flex items-center gap-2 sm:gap-3">
+            <div className="flex items-center gap-4">
               <button
-                onClick={() => setSoundEnabled(!soundEnabled)}
-                className={`p-2 sm:p-3 rounded-lg transition-all ${
-                  soundEnabled
-                    ? "bg-orange-500 hover:bg-orange-600 text-white"
-                    : "bg-gray-200 hover:bg-gray-300 text-gray-600"
-                }`}
-                title={soundEnabled ? "Mute Sound" : "Enable Sound"}
-              >
-                {soundEnabled ? <Volume2 className="h-4 w-4 sm:h-5 sm:w-5" /> : <VolumeX className="h-4 w-4 sm:h-5 sm:w-5" />}
-              </button>
-              <button
-                onClick={handleLogout}
-                className="px-4 py-2 sm:px-6 sm:py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all flex items-center gap-2 text-sm sm:text-base"
-              >
-                <LogOut className="h-4 w-4" />
-                <span className="hidden sm:inline">Logout</span>
-              </button>
+                  onClick={() => setSoundEnabled(!soundEnabled)}
+                  className={`p-2 rounded-lg transition-all ${
+                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+                </button>
+                <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
             </div>
+            
           </div>
-
-          {/* Event Title Banner - Now visible after first scan */}
-          {eventInfo && (
-            <div className="py-3 sm:py-4 border-t border-gray-200">
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
-                <div className="flex items-center gap-3">
-                  <Calendar className="h-5 w-5 text-orange-500 flex-shrink-0" />
-                  <div className="text-center sm:text-left">
-                    <h2 className="text-lg sm:text-xl font-bold text-gray-800">{eventInfo.title}</h2>
-                    <p className="text-xs sm:text-sm text-gray-600">
-                      {new Date(eventInfo.date).toLocaleDateString()} at {eventInfo.time}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-600 text-center sm:text-right">
-                  <MapPin className="h-4 w-4 text-orange-500 flex-shrink-0" />
-                  <span className="line-clamp-1">{eventInfo.location}</span>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
-          {/* Left Column - Scanner */}
-          <div className="lg:col-span-2 space-y-4 sm:space-y-6">
-            {/* Scan Mode Toggle */}
-            <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-6">
-              <h3 className="text-lg sm:text-xl font-bold text-gray-800 mb-4">Scanning Mode</h3>
-              <div className="grid grid-cols-2 gap-3 sm:gap-4">
-                <button
-                  onClick={() => toggleScanMode("camera")}
-                  className={`p-4 sm:p-6 rounded-xl border-2 transition-all ${
-                    scanMode === "camera"
-                      ? "border-orange-500 bg-orange-50 shadow-md"
-                      : "border-gray-200 bg-white hover:border-gray-300"
-                  }`}
-                >
-                  <Camera className={`h-8 w-8 sm:h-10 sm:w-10 mx-auto mb-2 ${
-                    scanMode === "camera" ? "text-orange-500" : "text-gray-400"
-                  }`} />
-                  <p className={`font-semibold text-sm sm:text-base ${
-                    scanMode === "camera" ? "text-orange-700" : "text-gray-600"
-                  }`}>
-                    Camera Scan
-                  </p>
-                  <p className="text-xs text-gray-500 mt-1">Scan QR codes with camera</p>
-                </button>
-                <button
-                  onClick={() => toggleScanMode("manual")}
-                  className={`p-4 sm:p-6 rounded-xl border-2 transition-all ${
-                    scanMode === "manual"
-                      ? "border-orange-500 bg-orange-50 shadow-md"
-                      : "border-gray-200 bg-white hover:border-gray-300"
-                  }`}
-                >
-                  <Keyboard className={`h-8 w-8 sm:h-10 sm:w-10 mx-auto mb-2 ${
-                    scanMode === "manual" ? "text-orange-500" : "text-gray-400"
-                  }`} />
-                  <p className={`font-semibold text-sm sm:text-base ${
-                    scanMode === "manual" ? "text-orange-700" : "text-gray-600"
-                  }`}>
-                    Manual Entry
-                  </p>
-                  <p className="text-xs text-gray-500 mt-1">Type ticket code manually</p>
-                </button>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Event Info Banner */}
+        {eventInfo && (
+          <div className="mb-6 bg-gradient-to-r from-orange-500 to-blue-500 rounded-2xl shadow-lg p-6 text-white">
+            <div className="flex items-center gap-3 mb-2">
+              <Calendar className="h-6 w-6" />
+              <h2 className="text-xl font-bold">{eventInfo.title}</h2>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4" />
+                <span>
+                  {new Date(eventInfo.date).toLocaleDateString()} at {eventInfo.time}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <MapPin className="h-4 w-4" />
+                <span className="truncate">{eventInfo.location}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Shield className="h-4 w-4" />
+                <span>Secure Verification</span>
               </div>
             </div>
+          </div>
+        )}
 
-            {/* Scanner Area */}
-            <div className="bg-white rounded-2xl shadow-lg p-4 sm:p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column - Scanner */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Mode Selection */}
+            <div className="bg-white rounded-2xl shadow-lg p-6">
+              <h3 className="text-lg font-bold text-gray-800 mb-2">Scanning Mode</h3>
+              <div className="grid grid-cols-3 gap-3">
+                <button
+                  onClick={() => {
+                    setScanMode("camera");
+                    setScanning(true);
+                    setCapturedImage(null);
+                    stopCamera();
+                  }}
+                  className={`p-4 rounded-lg border-2 transition-all ${
+                    scanMode === "camera"
+                      ? "border-orange-500 bg-orange-50"
+                      : "border-gray-200 hover:border-orange-300"
+                  }`}
+                >
+                  <Scan className="h-6 w-6 mx-auto mb-2 text-orange-500" />
+                  <p className="text-sm font-semibold text-gray-700">Barcode</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setScanMode("ocr");
+                    setScanning(false);
+                    setCapturedImage(null);
+                    stopCamera();
+                  }}
+                  className={`p-4 rounded-lg border-2 transition-all ${
+                    scanMode === "ocr"
+                      ? "border-blue-500 bg-blue-50"
+                      : "border-gray-200 hover:border-blue-300"
+                  }`}
+                >
+                  <FileImage className="h-6 w-6 mx-auto mb-2 text-blue-500" />
+                  <p className="text-sm font-semibold text-gray-700">OCR Scan</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setScanMode("manual");
+                    setScanning(false);
+                    setCapturedImage(null);
+                    stopCamera();
+                  }}
+                  className={`p-4 rounded-lg border-2 transition-all ${
+                    scanMode === "manual"
+                      ? "border-green-500 bg-green-50"
+                      : "border-gray-200 hover:border-green-300"
+                  }`}
+                >
+                  <Keyboard className="h-6 w-6 mx-auto mb-2 text-green-500" />
+                  <p className="text-sm font-semibold text-gray-700">Manual</p>
+                </button>
+              </div>
+
+            </div>
+
+            {/* Scanner Interface */}
+            <div className="bg-white rounded-2xl shadow-lg p-6">
               <div className="space-y-4">
-                {/* Camera Mode */}
+                {/* Barcode Scanner Mode */}
                 {scanMode === "camera" && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-lg sm:text-xl font-bold text-gray-800">Camera Scanner</h3>
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold text-gray-800">Barcode Scanner</h3>
                       <button
                         onClick={() => setScanning(!scanning)}
-                        className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 text-sm ${
+                        className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
                           scanning
                             ? "bg-red-500 hover:bg-red-600 text-white"
-                            : "bg-green-500 hover:bg-green-600 text-white"
+                            : "bg-orange-500 hover:bg-orange-600 text-white"
                         }`}
                       >
-                        {scanning ? (
-                          <>
-                            <Square className="h-4 w-4" />
-                            <span className="hidden sm:inline">Stop</span>
-                          </>
-                        ) : (
-                          <>
-                            <Play className="h-4 w-4" />
-                            <span className="hidden sm:inline">Start</span>
-                          </>
-                        )}
+                        {scanning ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                        {scanning ? "Stop" : "Start"} Scanner
                       </button>
                     </div>
-
-                    {scanning && !isLoading ? (
-                      <div className="relative">
+                    <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
+                      {scanning ? (
                         <BarcodeScannerComponent
                           width="100%"
-                          height={300}
+                          height="100%"
                           onUpdate={handleScan}
-                          stopStream={!scanning}
                         />
-                        <div className="absolute inset-0 pointer-events-none">
-                          <div className="absolute top-4 left-4 w-8 h-8 sm:w-12 sm:h-12 border-l-4 border-t-4 border-orange-500"></div>
-                          <div className="absolute top-4 right-4 w-8 h-8 sm:w-12 sm:h-12 border-r-4 border-t-4 border-orange-500"></div>
-                          <div className="absolute bottom-4 left-4 w-8 h-8 sm:w-12 sm:h-12 border-l-4 border-b-4 border-orange-500"></div>
-                          <div className="absolute bottom-4 right-4 w-8 h-8 sm:w-12 sm:h-12 border-r-4 border-b-4 border-orange-500"></div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="h-[300px] bg-gray-100 rounded-xl flex items-center justify-center">
-                        {isLoading ? (
-                          <Loader2 className="h-12 w-12 text-orange-500 animate-spin" />
-                        ) : (
-                          <div className="text-center p-4">
-                            <Scan className="h-16 w-16 text-gray-400 mx-auto mb-2" />
-                            <p className="text-gray-600 font-medium">Camera Stopped</p>
-                            <p className="text-sm text-gray-500 mt-1">Click Start to begin scanning</p>
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <div className="text-center text-white">
+                            <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                            <p className="text-lg font-semibold">Click Start Scanner to begin</p>
                           </div>
-                        )}
-                      </div>
-                    )}
+                        </div>
+                      )}
+                      {isLoading && (
+                        <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+                          <Loader2 className="h-12 w-12 text-white animate-spin" />
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
-                {/* Manual Mode */}
+                {/* OCR Scanner Mode */}
+                {scanMode === "ocr" && (
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold text-gray-800">OCR Scanner</h3>
+                      <div className="flex gap-2">
+                        {!capturedImage && (
+                          <>
+                            <button
+                              onClick={isCameraActive ? captureImage : startCamera}
+                              disabled={isOcrProcessing}
+                              className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-semibold transition-all flex items-center gap-2 disabled:opacity-50"
+                            >
+                              <Camera className="h-4 w-4" />
+                              {isCameraActive ? "Capture" : "Start Camera"}
+                            </button>
+                            <label className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold transition-all flex items-center gap-2 cursor-pointer">
+                              <Upload className="h-4 w-4" />
+                              Upload
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={handleFileUpload}
+                                className="hidden"
+                                disabled={isOcrProcessing}
+                              />
+                            </label>
+                          </>
+                        )}
+                        {capturedImage && (
+                          <button
+                            onClick={retakePhoto}
+                            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-semibold transition-all"
+                          >
+                            Retake
+                          </button>
+                        )}
+                        {isCameraActive && !capturedImage && (
+                          <button
+                            onClick={stopCamera}
+                            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
+                          >
+                            Stop Camera
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
+                      {/* Live Camera View */}
+                      {isCameraActive && !capturedImage && (
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          playsInline
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+
+                      {/* Captured Image */}
+                      {capturedImage && (
+                        <img
+                          src={capturedImage}
+                          alt="Captured ticket"
+                          className="w-full h-full object-contain"
+                        />
+                      )}
+
+                      {/* Default State */}
+                      {!isCameraActive && !capturedImage && (
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <div className="text-center text-white">
+                            <FileImage className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                            <p className="text-lg font-semibold mb-2">
+                              Start camera or upload image
+                            </p>
+                            <p className="text-sm opacity-75">
+                              System will automatically extract ticket code
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* OCR Processing Overlay */}
+                      {isOcrProcessing && (
+                        <div className="absolute inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center">
+                          <Loader2 className="h-12 w-12 text-white animate-spin mb-4" />
+                          <p className="text-white text-lg font-semibold mb-2">
+                            Processing Image...
+                          </p>
+                          <div className="w-64 bg-gray-700 rounded-full h-3 overflow-hidden">
+                            <div
+                              className="bg-blue-500 h-full transition-all duration-300"
+                              style={{ width: `${ocrProgress}%` }}
+                            />
+                          </div>
+                          <p className="text-white text-sm mt-2">{ocrProgress}%</p>
+                        </div>
+                      )}
+
+                      {/* Hidden canvas for image capture */}
+                      <canvas ref={canvasRef} className="hidden" />
+                    </div>
+
+                    {/* OCR Instructions */}
+                    <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                      <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+                        <AlertCircle className="h-5 w-5" />
+                        OCR Tips for Best Results:
+                      </h4>
+                      <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
+                        <li>Ensure good lighting on the ticket</li>
+                        <li>Keep the ticket code clear and in focus</li>
+                        <li>Avoid shadows or glare on the code</li>
+                        <li>Position the code straight (not tilted)</li>
+                        <li>Fill most of the frame with the ticket</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                {/* Manual Entry Mode */}
                 {scanMode === "manual" && (
-                  <div className="space-y-4">
-                    <h3 className="text-lg sm:text-xl font-bold text-gray-800">Manual Entry</h3>
-                    <div className="space-y-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-800 mb-4">Manual Entry</h3>
+                    <div className="flex gap-2">
                       <input
                         type="text"
                         value={manualCode}
-                        onChange={(e) => setManualCode(e.target.value)}
+                        onChange={(e) => setManualCode(e.target.value.toUpperCase())}
                         onKeyPress={(e) => e.key === "Enter" && handleManualScan()}
-                        placeholder="Enter ticket code..."
-                        className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent text-base font-mono"
+                        placeholder="Enter ticket code"
+                        className="flex-1 px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500 font-mono text-lg"
                         disabled={isLoading}
                       />
                       <button
                         onClick={handleManualScan}
                         disabled={!manualCode.trim() || isLoading}
-                        className="w-full py-3 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all flex items-center justify-center gap-2"
+                        className="px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                       >
                         {isLoading ? (
-                          <>
-                            <Loader2 className="h-5 w-5 animate-spin" />
-                            Verifying...
-                          </>
+                          <Loader2 className="h-5 w-5 animate-spin" />
                         ) : (
-                          <>
-                            <Scan className="h-5 w-5" />
-                            Verify Ticket
-                          </>
+                          <Scan className="h-5 w-5" />
                         )}
+                        Verify
                       </button>
                     </div>
+                    <p className="text-sm text-gray-600 mt-2">
+                      Enter the ticket code manually and press Verify or Enter
+                    </p>
                   </div>
                 )}
 
+                {/* Scanned Data Display */}
                 {data && (
-                  <div className="text-center space-y-2">
-                    <p className="text-sm text-gray-600">Last Scanned Code:</p>
-                    <p className="font-mono text-xs sm:text-sm bg-orange-50 border border-orange-200 p-3 rounded-lg break-all">
+                  <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <p className="text-sm text-gray-600 mb-1">Scanned Code:</p>
+                    <p className="text-xl font-mono font-bold text-gray-900 break-all">
                       {data}
                     </p>
                   </div>
