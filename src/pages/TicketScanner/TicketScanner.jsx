@@ -51,7 +51,7 @@ const TicketScanner = () => {
   
   // Settings states
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [scanMode, setScanMode] = useState("camera"); // 'camera', 'manual', 'ocr'
+  const [scanMode, setScanMode] = useState("ocr"); // 'camera', 'manual', 'ocr'
   const [manualCode, setManualCode] = useState("");
   
   // OCR states
@@ -84,6 +84,17 @@ const TicketScanner = () => {
     }
   }, [navigate]);
 
+
+  // Auto-start OCR camera on mount
+  useEffect(() => {
+    if (scanMode === "ocr" && !ocrScanning) {
+      // Small delay to ensure refs are ready
+      const timer = setTimeout(() => {
+        startOcrCamera();
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, []);
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -96,7 +107,7 @@ const TicketScanner = () => {
     if (ocrScanning && videoRef.current && videoRef.current.readyState === 4) {
       scanIntervalRef.current = setInterval(() => {
         captureAndScan();
-      }, 3000); // Scan every 3 seconds
+      }, 8000); // Scan every 9 seconds
     } else {
       if (scanIntervalRef.current) {
         clearInterval(scanIntervalRef.current);
@@ -297,7 +308,7 @@ const TicketScanner = () => {
           setTimeout(() => {
             setLastScannedCode("");
             setOcrStatus("Ready for next ticket");
-          }, 5000);
+          }, 3000);
         } else {
           setOcrStatus("Looking for ticket code...");
         }
@@ -615,10 +626,10 @@ const TicketScanner = () => {
                 <MapPin className="h-4 w-4" />
                 <span className="truncate">{eventInfo.location}</span>
               </div>
-              <div className="flex items-center gap-2">
+              {/* <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4" />
                 <span>OCR.space Powered</span>
-              </div>
+              </div> */}
             </div>
           </div>
         )}
@@ -728,7 +739,7 @@ const TicketScanner = () => {
                 {scanMode === "ocr" && (
                   <div>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-bold text-gray-800">OCR Scanner (OCR.space)</h3>
+                      <h3 className="text-lg font-bold text-gray-800">BARCODE SCANNER</h3>
                       <button
                         onClick={ocrScanning ? stopOcrCamera : startOcrCamera}
                         className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
@@ -777,7 +788,7 @@ const TicketScanner = () => {
                           <div className="text-center text-white">
                             <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
                             <p className="text-lg font-semibold mb-2">Click Start</p>
-                            <p className="text-sm opacity-75">OCR.space API (FREE!)</p>
+                            {/* <p className="text-sm opacity-75">OCR.space API (FREE!)</p> */}
                           </div>
                         </div>
                       )}
@@ -786,14 +797,13 @@ const TicketScanner = () => {
                     <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
                       <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
                         <AlertCircle className="h-5 w-5" />
-                        OCR Tips (OCR.space API):
+                        Scanner Tips:
                       </h4>
                       <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
                         <li>Point directly at ticket code</li>
-                        <li>Hold steady for 3 seconds</li>
+                        <li>Hold steady for 10 seconds</li>
                         <li>Good lighting required</li>
-                        <li>Auto-scans every 3 seconds</li>
-                        <li>Much better than Tesseract!</li>
+                        <li>Auto-scans every 10 seconds</li>
                       </ul>
                     </div>
                   </div>
@@ -802,7 +812,7 @@ const TicketScanner = () => {
                 {/* Manual Entry Mode */}
                 {scanMode === "manual" && (
                   <div>
-                    <h3 className="text-lg font-bold text-gray-800 mb-4">Manual Entry</h3>
+                    <h3 className="text-lg font-bold text-gray-800 mb-4 uppercase">Manual Entry</h3>
                     <div className="flex gap-2">
                       <input
                         type="text"
