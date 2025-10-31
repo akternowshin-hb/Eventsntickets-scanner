@@ -63,6 +63,13 @@ const TicketScanner = () => {
   // Event info state
   const [eventInfo, setEventInfo] = useState(null);
 
+  // OCR.space PRO endpoints (with fallback)
+  const OCR_ENDPOINTS = {
+    primary: "https://apipro1.ocr.space/parse/image",
+    secondary: "https://apipro2.ocr.space/parse/image"
+  };
+  const OCR_API_KEY = "G8883H9NLL5RX"; // PRO tier API key
+
   // Check authentication on mount
   useEffect(() => {
     const token = localStorage.getItem("moderator-token");
@@ -84,7 +91,6 @@ const TicketScanner = () => {
     }
   }, [navigate]);
 
-
   // Auto-start OCR camera on mount
   useEffect(() => {
     if (scanMode === "ocr" && !ocrScanning) {
@@ -94,7 +100,8 @@ const TicketScanner = () => {
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, []);
+  }, [scanMode]); // Added scanMode dependency
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -107,7 +114,7 @@ const TicketScanner = () => {
     if (ocrScanning && videoRef.current && videoRef.current.readyState === 4) {
       scanIntervalRef.current = setInterval(() => {
         captureAndScan();
-      }, 8000); // Scan every 9 seconds
+      }, 3000); // Scan every 3 seconds for faster detection
     } else {
       if (scanIntervalRef.current) {
         clearInterval(scanIntervalRef.current);
@@ -256,35 +263,60 @@ const TicketScanner = () => {
         setOcrStatus("Scanning...");
         await processImageWithOCR(blob);
       }
-    }, "image/jpeg", 0.9);
+    }, "image/jpeg", 0.95); // Increased quality for better OCR
   };
 
-  // Process image with OCR.space API (FREE!)
+  // Process image with OCR.space PRO API with fallback
   const processImageWithOCR = async (imageBlob) => {
     if (isLoading) return;
 
     try {
-      // Create FormData for OCR.space API
+      // Convert blob to base64
+      const base64Image = await blobToBase64(imageBlob);
+
+      // Create FormData for OCR.space PRO API
       const formData = new FormData();
-      formData.append("base64Image", await blobToBase64(imageBlob));
-      formData.append("apikey", "K87899142388957"); // FREE API KEY
+      formData.append("base64Image", base64Image);
+      formData.append("apikey", OCR_API_KEY);
       formData.append("language", "eng");
       formData.append("isOverlayRequired", "false");
       formData.append("detectOrientation", "true");
       formData.append("scale", "true");
-      formData.append("OCREngine", "2"); // Engine 2 is better
+      formData.append("OCREngine", "2"); // Engine 2 is better for alphanumeric
 
-      // Call OCR.space API
-      const response = await fetch("https://api.ocr.space/parse/image", {
-        method: "POST",
-        body: formData,
-      });
+      // Try primary endpoint first, then fallback to secondary
+      let ocrResult = null;
+      let response = null;
 
-      const ocrResult = await response.json();
-      
+      try {
+        response = await fetch(OCR_ENDPOINTS.primary, {
+          method: "POST",
+          body: formData,
+        });
+        ocrResult = await response.json();
+      } catch (primaryError) {
+        console.warn("⚠️ Primary OCR endpoint failed, trying secondary...", primaryError);
+        
+        // Fallback to secondary endpoint
+        try {
+          response = await fetch(OCR_ENDPOINTS.secondary, {
+            method: "POST",
+            body: formData,
+          });
+          ocrResult = await response.json();
+          toast.info("Using backup OCR server");
+        } catch (secondaryError) {
+          console.error("❌ Both OCR endpoints failed:", secondaryError);
+          setOcrStatus("OCR service unavailable");
+          toast.error("OCR service temporarily unavailable");
+          return;
+        }
+      }
+
       console.log("🔍 OCR Result:", ocrResult);
 
       if (ocrResult.IsErroredOnProcessing) {
+        console.error("OCR Processing Error:", ocrResult.ErrorMessage);
         setOcrStatus("Error scanning - try again");
         return;
       }
@@ -304,18 +336,23 @@ const TicketScanner = () => {
           // Automatically verify the ticket
           await processTicket(ticketCode);
           
-          // Clear last scanned after 5 seconds
+          // Clear last scanned after 3 seconds
           setTimeout(() => {
             setLastScannedCode("");
             setOcrStatus("Ready for next ticket");
           }, 3000);
+        } else if (ticketCode === lastScannedCode) {
+          // Same code detected, ignore to prevent duplicate scans
+          setOcrStatus("Already scanned - show new ticket");
         } else {
           setOcrStatus("Looking for ticket code...");
         }
+      } else {
+        setOcrStatus("No text detected - adjust camera");
       }
     } catch (error) {
       console.error("OCR Error:", error);
-      setOcrStatus("Scanning...");
+      setOcrStatus("Scanning error - retrying...");
     }
   };
 
@@ -324,9 +361,8 @@ const TicketScanner = () => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        // Remove data URL prefix to get just base64 string
-        const base64 = reader.result.split(',')[1];
-        resolve("data:image/jpeg;base64," + base64);
+        // Return the full data URL (includes data:image/jpeg;base64, prefix)
+        resolve(reader.result);
       };
       reader.onerror = reject;
       reader.readAsDataURL(blob);
@@ -338,7 +374,7 @@ const TicketScanner = () => {
     if (!text) return null;
     
     // Clean text - remove whitespace and special chars
-    const cleanedText = text.replace(/[\s\r\n]+/g, "").toUpperCase();
+    const cleanedText = text.replace(/[\s\r\n\t]+/g, "").toUpperCase();
     
     console.log("🧹 Cleaned text:", cleanedText);
     
@@ -349,6 +385,7 @@ const TicketScanner = () => {
       /\b\d{8,}\b/g,                 // 8+ digits only
       /\b[A-Z]{2,}\d{6,}\b/g,        // Letters + 6+ numbers
       /\b\d{6,}[A-Z]{2,}\b/g,        // 6+ numbers + letters
+      /\b[A-Z0-9]{6,}\b/g,           // 6+ alphanumeric (relaxed)
     ];
     
     for (const pattern of patterns) {
@@ -362,8 +399,10 @@ const TicketScanner = () => {
           const notAllSame = !/^(.)\1+$/.test(match);
           // Minimum length 6
           const longEnough = match.length >= 6;
+          // Avoid common OCR errors
+          const notGarbage = !/^[OI0]{6,}$/.test(match); // All O, I, or 0
           
-          return hasNumbers && notAllSame && longEnough;
+          return hasNumbers && notAllSame && longEnough && notGarbage;
         });
         
         if (validMatches.length > 0) {
@@ -380,26 +419,30 @@ const TicketScanner = () => {
   const playSound = (type) => {
     if (!soundEnabled) return;
 
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
 
-    oscillator.connect(gainNode);
-    gainNode.connect(audioContext.destination);
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
 
-    if (type === "success") {
-      oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-      oscillator.frequency.setValueAtTime(1000, audioContext.currentTime + 0.1);
-    } else {
-      oscillator.frequency.setValueAtTime(400, audioContext.currentTime);
-      oscillator.frequency.setValueAtTime(300, audioContext.currentTime + 0.1);
+      if (type === "success") {
+        oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+        oscillator.frequency.setValueAtTime(1000, audioContext.currentTime + 0.1);
+      } else {
+        oscillator.frequency.setValueAtTime(400, audioContext.currentTime);
+        oscillator.frequency.setValueAtTime(300, audioContext.currentTime + 0.1);
+      }
+
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.2);
+    } catch (error) {
+      console.error("Error playing sound:", error);
     }
-
-    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-
-    oscillator.start(audioContext.currentTime);
-    oscillator.stop(audioContext.currentTime + 0.2);
   };
 
   const updateStats = (status) => {
@@ -572,7 +615,7 @@ const TicketScanner = () => {
   return (
     <div className="min-h-screen text-gray-800 bg-gradient-to-br from-orange-50 via-white to-blue-50">
       {/* Header */}
-      <div className="bg-white shadow-md sticky top-0 z-50 ">
+      <div className="bg-white shadow-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between py-4">
             <div className="flex items-center gap-3">
@@ -580,28 +623,31 @@ const TicketScanner = () => {
               <div>
                 <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Ticket Scanner</h1>
                 {moderatorData && (
-                  <p className="text-xs text-gray-600 flex items-center"><Shield className="w-4 h-4"></Shield>  {moderatorData.name}</p>
+                  <p className="text-xs text-gray-600 flex items-center gap-1">
+                    <Shield className="w-3 h-3" />
+                    {moderatorData.name}
+                  </p>
                 )}
               </div>
             </div>
             <div className="flex gap-3 items-center">
-                <button
-                  onClick={() => setSoundEnabled(!soundEnabled)}
-                  className={`p-2 rounded-lg transition-all ${
-                    soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
-                </button>
-                <button
-              onClick={handleLogout}
-              className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
-            >
-              <LogOut className="h-4 w-4" />
-              <span className="hidden sm:inline">Logout</span>
-            </button>
-              </div>
-            
+              <button
+                onClick={() => setSoundEnabled(!soundEnabled)}
+                className={`p-2 rounded-lg transition-all ${
+                  soundEnabled ? "bg-orange-100 text-orange-600" : "bg-gray-100 text-gray-600"
+                }`}
+                title={soundEnabled ? "Sound On" : "Sound Off"}
+              >
+                {soundEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
+              </button>
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-all"
+              >
+                <LogOut className="h-4 w-4" />
+                <span className="hidden sm:inline">Logout</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -615,7 +661,7 @@ const TicketScanner = () => {
               <Calendar className="h-6 w-6" />
               <h2 className="text-xl font-bold">{eventInfo.title}</h2>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
               <div className="flex items-center gap-2">
                 <Clock className="h-4 w-4" />
                 <span>
@@ -626,10 +672,6 @@ const TicketScanner = () => {
                 <MapPin className="h-4 w-4" />
                 <span className="truncate">{eventInfo.location}</span>
               </div>
-              {/* <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4" />
-                <span>OCR.space Powered</span>
-              </div> */}
             </div>
           </div>
         )}
@@ -641,21 +683,6 @@ const TicketScanner = () => {
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <h3 className="text-lg font-bold text-gray-800 mb-4">Scanning Mode</h3>
               <div className="grid grid-cols-2 gap-3">
-                {/* <button
-                  onClick={() => {
-                    setScanMode("camera");
-                    setScanning(true);
-                    stopOcrCamera();
-                  }}
-                  className={`p-4 rounded-lg border-2 transition-all ${
-                    scanMode === "camera"
-                      ? "border-orange-500 bg-orange-50"
-                      : "border-gray-200 hover:border-orange-300"
-                  }`}
-                >
-                  <Scan className="h-6 w-6 mx-auto mb-2 text-orange-500" />
-                  <p className="text-sm font-semibold text-gray-700">Barcode</p>
-                </button> */}
                 <button
                   onClick={() => {
                     setScanMode("ocr");
@@ -668,8 +695,8 @@ const TicketScanner = () => {
                       : "border-gray-200 hover:border-blue-300"
                   }`}
                 >
-                  <Scan className="h-6 w-6 mx-auto mb-2 text-blue-500" />
-                  <p className="text-sm font-semibold text-gray-700">Barcode</p>
+                  <Camera className="h-6 w-6 mx-auto mb-2 text-blue-500" />
+                  <p className="text-sm font-semibold text-gray-700">OCR Scanner</p>
                 </button>
                 <button
                   onClick={() => {
@@ -684,62 +711,19 @@ const TicketScanner = () => {
                   }`}
                 >
                   <Keyboard className="h-6 w-6 mx-auto mb-2 text-green-500" />
-                  <p className="text-sm font-semibold text-gray-700">Manual</p>
+                  <p className="text-sm font-semibold text-gray-700">Manual Entry</p>
                 </button>
               </div>
-
-              
             </div>
 
             {/* Scanner Interface */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <div className="space-y-4">
-                {/* Barcode Scanner Mode */}
-                {scanMode === "camera" && (
-                  <div>
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-bold text-gray-800">Barcode Scanner</h3>
-                      <button
-                        onClick={() => setScanning(!scanning)}
-                        className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
-                          scanning
-                            ? "bg-red-500 hover:bg-red-600 text-white"
-                            : "bg-orange-500 hover:bg-orange-600 text-white"
-                        }`}
-                      >
-                        {scanning ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                        {scanning ? "Stop" : "Start"}
-                      </button>
-                    </div>
-                    <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
-                      {scanning ? (
-                        <BarcodeScannerComponent
-                          width="100%"
-                          height="100%"
-                          onUpdate={handleScan}
-                        />
-                      ) : (
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          <div className="text-center text-white">
-                            <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                            <p className="text-lg font-semibold">Click Start to begin</p>
-                          </div>
-                        </div>
-                      )}
-                      {isLoading && (
-                        <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                          <Loader2 className="h-12 w-12 text-white animate-spin" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
                 {/* OCR Scanner Mode */}
                 {scanMode === "ocr" && (
                   <div>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-bold text-gray-800">BARCODE SCANNER</h3>
+                      <h3 className="text-lg font-bold text-gray-800">OCR SCANNER</h3>
                       <button
                         onClick={ocrScanning ? stopOcrCamera : startOcrCamera}
                         className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
@@ -788,7 +772,7 @@ const TicketScanner = () => {
                           <div className="text-center text-white">
                             <Camera className="h-16 w-16 mx-auto mb-4 opacity-50" />
                             <p className="text-lg font-semibold mb-2">Click Start</p>
-                            {/* <p className="text-sm opacity-75">OCR.space API (FREE!)</p> */}
+                            <p className="text-sm opacity-75">OCR.space PRO API</p>
                           </div>
                         </div>
                       )}
@@ -801,9 +785,9 @@ const TicketScanner = () => {
                       </h4>
                       <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
                         <li>Point directly at ticket code</li>
-                        <li>Hold steady for 10 seconds</li>
-                        <li>Good lighting required</li>
-                        <li>Auto-scans every 10 seconds</li>
+                        <li>Hold steady for best results</li>
+                        <li>Ensure good lighting</li>
+                        <li>Auto-scans every 3 seconds</li>
                       </ul>
                     </div>
                   </div>
@@ -812,7 +796,7 @@ const TicketScanner = () => {
                 {/* Manual Entry Mode */}
                 {scanMode === "manual" && (
                   <div>
-                    <h3 className="text-lg font-bold text-gray-800 mb-4 uppercase">Manual Entry</h3>
+                    <h3 className="text-lg font-bold text-gray-800 mb-4">MANUAL ENTRY</h3>
                     <div className="flex gap-2">
                       <input
                         type="text"

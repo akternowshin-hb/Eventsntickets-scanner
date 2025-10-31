@@ -1,2 +1,19 @@
 @import "tailwindcss";
 @plugin "daisyui";
+
+
+
+:root {
+  --color-primary: #ee4123;
+  --color-secondary: #8a2514;
+}
+
+.hover-secondary:hover {
+    color: var(--color-secondary);
+  }
+  
+body {
+  font-family: 'Poppins', sans-serif;
+  color: #333;
+  background-color: #fff;
+}
