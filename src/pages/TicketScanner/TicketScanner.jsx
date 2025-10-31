@@ -1040,13 +1040,13 @@ const TicketScanner = () => {
                     </div>
 
                     <div className="border-t border-gray-200 my-4"></div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-                      <div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 gap-4 text-sm">
+                      {/* <div>
                         <p className="text-gray-600">Purchase Date</p>
                         <p className="font-medium text-gray-900">
                           {new Date(result.verificationResult.purchaseDate).toLocaleDateString()}
                         </p>
-                      </div>
+                      </div> */}
                       <div>
                         <p className="text-gray-600">Scan Time</p>
                         <p className="font-medium text-gray-900">
