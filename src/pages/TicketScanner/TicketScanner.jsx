@@ -21,6 +21,10 @@ import {
   Shield,
   AlertCircle,
   Camera,
+  X,
+  Check,
+  Ticket,
+  Users,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import serverURL from "../../ServerConfig";
@@ -63,6 +67,10 @@ const TicketScanner = () => {
   // Event info state
   const [eventInfo, setEventInfo] = useState(null);
 
+  // Confirmation Modal states
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [pendingTicketCode, setPendingTicketCode] = useState("");
+
   // OCR.space PRO endpoints (with fallback)
   const OCR_ENDPOINTS = {
     primary: "https://apipro1.ocr.space/parse/image",
@@ -100,7 +108,7 @@ const TicketScanner = () => {
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [scanMode]); // Added scanMode dependency
+  }, [scanMode]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -111,10 +119,10 @@ const TicketScanner = () => {
 
   // Auto-scan effect when OCR camera is active
   useEffect(() => {
-    if (ocrScanning && videoRef.current && videoRef.current.readyState === 4) {
+    if (ocrScanning && videoRef.current && videoRef.current.readyState === 4 && !showConfirmModal) {
       scanIntervalRef.current = setInterval(() => {
         captureAndScan();
-      }, 3000); // Scan every 3 seconds for faster detection
+      }, 3000);
     } else {
       if (scanIntervalRef.current) {
         clearInterval(scanIntervalRef.current);
@@ -126,7 +134,7 @@ const TicketScanner = () => {
         clearInterval(scanIntervalRef.current);
       }
     };
-  }, [ocrScanning]);
+  }, [ocrScanning, showConfirmModal]);
 
   const fetchTodayStats = async (moderatorId, token) => {
     try {
@@ -241,7 +249,7 @@ const TicketScanner = () => {
 
   // Capture and scan with OCR.space API
   const captureAndScan = async () => {
-    if (!videoRef.current || !canvasRef.current || isLoading) {
+    if (!videoRef.current || !canvasRef.current || isLoading || showConfirmModal) {
       return;
     }
 
@@ -263,12 +271,12 @@ const TicketScanner = () => {
         setOcrStatus("Scanning...");
         await processImageWithOCR(blob);
       }
-    }, "image/jpeg", 0.95); // Increased quality for better OCR
+    }, "image/jpeg", 0.95);
   };
 
   // Process image with OCR.space PRO API with fallback
   const processImageWithOCR = async (imageBlob) => {
-    if (isLoading) return;
+    if (isLoading || showConfirmModal) return;
 
     try {
       // Convert blob to base64
@@ -282,7 +290,7 @@ const TicketScanner = () => {
       formData.append("isOverlayRequired", "false");
       formData.append("detectOrientation", "true");
       formData.append("scale", "true");
-      formData.append("OCREngine", "2"); // Engine 2 is better for alphanumeric
+      formData.append("OCREngine", "2");
 
       // Try primary endpoint first, then fallback to secondary
       let ocrResult = null;
@@ -297,7 +305,6 @@ const TicketScanner = () => {
       } catch (primaryError) {
         console.warn("⚠️ Primary OCR endpoint failed, trying secondary...", primaryError);
         
-        // Fallback to secondary endpoint
         try {
           response = await fetch(OCR_ENDPOINTS.secondary, {
             method: "POST",
@@ -333,16 +340,12 @@ const TicketScanner = () => {
           setData(ticketCode);
           setOcrStatus(`Found: ${ticketCode}`);
           
-          // Automatically verify the ticket
-          await processTicket(ticketCode);
+          // Show confirmation modal instead of auto-processing
+          setPendingTicketCode(ticketCode);
+          setShowConfirmModal(true);
+          playSound("success");
           
-          // Clear last scanned after 3 seconds
-          setTimeout(() => {
-            setLastScannedCode("");
-            setOcrStatus("Ready for next ticket");
-          }, 3000);
         } else if (ticketCode === lastScannedCode) {
-          // Same code detected, ignore to prevent duplicate scans
           setOcrStatus("Already scanned - show new ticket");
         } else {
           setOcrStatus("Looking for ticket code...");
@@ -361,7 +364,6 @@ const TicketScanner = () => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        // Return the full data URL (includes data:image/jpeg;base64, prefix)
         resolve(reader.result);
       };
       reader.onerror = reject;
@@ -373,40 +375,32 @@ const TicketScanner = () => {
   const extractTicketCode = (text) => {
     if (!text) return null;
     
-    // Clean text - remove whitespace and special chars
     const cleanedText = text.replace(/[\s\r\n\t]+/g, "").toUpperCase();
     
     console.log("🧹 Cleaned text:", cleanedText);
     
-    // CUSTOMIZE THESE PATTERNS FOR YOUR TICKET FORMAT
     const patterns = [
-      /\b[A-Z0-9]{10,}\b/g,          // 10+ alphanumeric (most ticket codes)
-      /\b[A-Z0-9]{8,}\b/g,           // 8+ alphanumeric
-      /\b\d{8,}\b/g,                 // 8+ digits only
-      /\b[A-Z]{2,}\d{6,}\b/g,        // Letters + 6+ numbers
-      /\b\d{6,}[A-Z]{2,}\b/g,        // 6+ numbers + letters
-      /\b[A-Z0-9]{6,}\b/g,           // 6+ alphanumeric (relaxed)
+      /\b[A-Z0-9]{10,}\b/g,
+      /\b[A-Z0-9]{8,}\b/g,
+      /\b\d{8,}\b/g,
+      /\b[A-Z]{2,}\d{6,}\b/g,
+      /\b\d{6,}[A-Z]{2,}\b/g,
+      /\b[A-Z0-9]{6,}\b/g,
     ];
     
     for (const pattern of patterns) {
       const matches = cleanedText.match(pattern);
       if (matches && matches.length > 0) {
-        // Filter out common garbage patterns
         const validMatches = matches.filter(match => {
-          // Must have at least some numbers
           const hasNumbers = /\d/.test(match);
-          // Should not be all same character
           const notAllSame = !/^(.)\1+$/.test(match);
-          // Minimum length 6
           const longEnough = match.length >= 6;
-          // Avoid common OCR errors
-          const notGarbage = !/^[OI0]{6,}$/.test(match); // All O, I, or 0
+          const notGarbage = !/^[OI0]{6,}$/.test(match);
           
           return hasNumbers && notAllSame && longEnough && notGarbage;
         });
         
         if (validMatches.length > 0) {
-          // Return longest valid match
           return validMatches.sort((a, b) => b.length - a.length)[0];
         }
       }
@@ -465,6 +459,23 @@ const TicketScanner = () => {
       await processTicket(manualCode.trim());
       setManualCode("");
     }
+  };
+
+  // Handle confirmation of scanned ticket
+  const handleConfirmTicket = async () => {
+    setShowConfirmModal(false);
+    await processTicket(pendingTicketCode);
+  };
+
+  // Handle rescan request
+  const handleRescan = () => {
+    setShowConfirmModal(false);
+    setPendingTicketCode("");
+    setData("");
+    setOcrStatus("Ready for next scan");
+    setTimeout(() => {
+      setLastScannedCode("");
+    }, 1000);
   };
 
   const processTicket = async (code) => {
@@ -553,6 +564,8 @@ const TicketScanner = () => {
           setResult(null);
           setData("");
         }
+        setLastScannedCode("");
+        setOcrStatus("Ready for next ticket");
       }, 3000);
     }
   };
@@ -614,8 +627,63 @@ const TicketScanner = () => {
 
   return (
     <div className="min-h-screen text-gray-800 bg-gradient-to-br from-orange-50 via-white to-blue-50">
+      {/* Confirmation Modal */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div 
+            className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+            onClick={handleRescan}
+          ></div>
+          
+          <div className="relative bg-white rounded-2xl shadow-2xl p-6 sm:p-8 max-w-md w-full transform transition-all animate-scale-in">
+            <div className="text-center">
+              <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-blue-100 mb-4">
+                <AlertCircle className="h-8 w-8 text-blue-600" />
+              </div>
+              
+              <h3 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">
+                Confirm Ticket Code
+              </h3>
+              
+              <p className="text-sm text-gray-600 mb-4">
+                Is this the correct ticket code?
+              </p>
+              
+              <div className="bg-gray-50 rounded-lg p-4 mb-6 border-2 border-gray-200">
+                <p className="text-xs text-gray-500 mb-1">Scanned Code:</p>
+                <p className="text-2xl font-mono font-bold text-gray-900 break-all">
+                  {pendingTicketCode}
+                </p>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={handleRescan}
+                  className="flex-1 px-6 py-3 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-semibold transition-all flex items-center justify-center gap-2"
+                >
+                  <X className="h-5 w-5" />
+                  Rescan
+                </button>
+                <button
+                  onClick={handleConfirmTicket}
+                  disabled={isLoading}
+                  className="flex-1 px-6 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isLoading ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <Check className="h-5 w-5" />
+                  )}
+                  Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
-      <div className="bg-white shadow-md sticky top-0 z-50">
+      <div className="bg-white shadow-md sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between py-4">
             <div className="flex items-center gap-3">
@@ -749,7 +817,7 @@ const TicketScanner = () => {
 
                       <div className="absolute top-4 left-4 right-4 bg-black bg-opacity-70 text-white px-4 py-2 rounded-lg">
                         <div className="flex items-center gap-2">
-                          {ocrScanning ? (
+                          {ocrScanning && !showConfirmModal ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
                             <Camera className="h-4 w-4" />
@@ -787,7 +855,7 @@ const TicketScanner = () => {
                         <li>Point directly at ticket code</li>
                         <li>Hold steady for best results</li>
                         <li>Ensure good lighting</li>
-                        <li>Auto-scans every 3 seconds</li>
+                        <li>Confirm code before processing</li>
                       </ul>
                     </div>
                   </div>
@@ -823,7 +891,7 @@ const TicketScanner = () => {
                   </div>
                 )}
 
-                {data && (
+                {data && !showConfirmModal && (
                   <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
                     <p className="text-sm text-gray-600 mb-1">Ticket Code:</p>
                     <p className="text-xl font-mono font-bold text-gray-900 break-all">
@@ -857,6 +925,53 @@ const TicketScanner = () => {
 
                 {result.verificationResult && (
                   <>
+                    {/* Ticket Seats Information - Prominent Display */}
+                    {result.verificationResult.totalSeats && (
+                      <div className="mb-4 p-4 bg-white rounded-lg border-2 border-blue-300 shadow-sm">
+                        <div className="flex items-center gap-2 mb-3">
+                          <Ticket className="h-5 w-5 text-blue-600" />
+                          <h4 className="font-bold text-blue-900">Ticket Details</h4>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="text-center p-3 bg-blue-50 rounded-lg">
+                            <Users className="h-5 w-5 mx-auto mb-1 text-blue-600" />
+                            <p className="text-2xl font-bold text-blue-600">
+                              {result.verificationResult.totalSeats}
+                            </p>
+                            <p className="text-xs text-blue-700 font-medium">Total Seats</p>
+                          </div>
+                          <div className="text-center p-3 bg-orange-50 rounded-lg">
+                            <CheckCircle className="h-5 w-5 mx-auto mb-1 text-orange-600" />
+                            <p className="text-2xl font-bold text-orange-600">
+                              {result.verificationResult.usedScans}
+                            </p>
+                            <p className="text-xs text-orange-700 font-medium">Used Scans</p>
+                          </div>
+                          <div className="text-center p-3 bg-green-50 rounded-lg">
+                            <Ticket className="h-5 w-5 mx-auto mb-1 text-green-600" />
+                            <p className="text-2xl font-bold text-green-600">
+                              {result.verificationResult.remainingSeats}
+                            </p>
+                            <p className="text-xs text-green-700 font-medium">Remaining</p>
+                          </div>
+                        </div>
+                        {result.verificationResult.remainingSeats === 0 && (
+                          <div className="mt-3 p-2 bg-red-100 border border-red-300 rounded-lg">
+                            <p className="text-sm text-red-800 font-semibold text-center">
+                              ⚠️ All seats for this ticket have been used
+                            </p>
+                          </div>
+                        )}
+                        {result.verificationResult.remainingSeats > 0 && (
+                          <div className="mt-3 p-2 bg-green-100 border border-green-300 rounded-lg">
+                            <p className="text-sm text-green-800 font-semibold text-center">
+                              ✓ {result.verificationResult.remainingSeats} seat(s) still available
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="border-t border-gray-200 my-4"></div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="space-y-3">
@@ -1007,6 +1122,23 @@ const TicketScanner = () => {
           </div>
         </div>
       </div>
+
+      {/* Add CSS for modal animation */}
+      <style jsx>{`
+        @keyframes scale-in {
+          from {
+            opacity: 0;
+            transform: scale(0.9);
+          }
+          to {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+        .animate-scale-in {
+          animation: scale-in 0.2s ease-out;
+        }
+      `}</style>
     </div>
   );
 };
